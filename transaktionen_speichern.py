@@ -34,6 +34,9 @@ from fints.client import FinTS3PinTanClient, NeedTANResponse
 from dotenv import load_dotenv
 load_dotenv()
 
+# FinTS-Produkt-ID (wird von CLI und Web-Abruf gemeinsam genutzt)
+PRODUCT_ID = "6151256F3D4F9975B877BD4A2"
+
 SCHEMA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "schema.sql")
 
 # Tabellenspalten, die aus dem data-Dict gefüllt werden.
@@ -380,7 +383,7 @@ def main():
     password = getpass.getpass(f"PIN für {bank} ({username}): ")
 
     # Nutzen Sie die funktionierende Produkt-ID
-    product_id = "6151256F3D4F9975B877BD4A2"
+    product_id = PRODUCT_ID
 
     client = FinTS3PinTanClient(blz,
                                 username,

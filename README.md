@@ -116,8 +116,8 @@ Das Dashboard (übernommen aus `finance-tracker`) liest direkt aus der
 SQLite-DB (`DB_PATH`, Default `finance.db`).
 
 ```bash
-uv run uvicorn web.app:app --host 0.0.0.0 --port 4713
-# -> http://127.0.0.1:4713
+uv run uvicorn web.app:app --host 0.0.0.0 --port 4711
+# -> http://127.0.0.1:4711
 ```
 
 Enthalten: Kennzahlen, Einnahmen/Ausgaben (monatlich/jährlich), Kategorie-Auswertung,
@@ -136,3 +136,18 @@ uv run python migration/import_finance_tracker.py \
 
 Achtung: Die Quelle enthält Mock-Daten (`source: mock`), keine echten Bankumsätze.
 Import ist idempotent (Duplikate werden übersprungen).
+
+### Bankabruf über die GUI (FinTS)
+
+Im Dashboard unter „Bankabruf (FinTS)“: Bank wählen, PIN eingeben, „Umsätze abrufen“.
+- Die PIN wird nur für diesen Abruf verwendet, nicht gespeichert und nach dem Absenden
+  aus dem Feld entfernt. Sie erscheint nicht im Log und nicht in der Datenbank.
+- Bei Bedarf fragt die GUI nach TAN-Medium, TAN, photoTAN oder App-Freigabe.
+- Bank-Konfiguration (BLZ, Benutzerkennung, FinTS-URL, TAN-Verfahren) kommt weiterhin aus der `.env`
+  (siehe `.env.example`). Ohne diese Werte ist die Bank in der GUI gesperrt.
+- Pro Zeitpunkt läuft nur ein Abruf.
+- Die Abläufe sind mit einem Fake-FinTS-Client getestet (`tests/test_sync_flow.py`).
+  Ein Test gegen die echte Bank steht noch aus.
+
+Hinweis Transport: Die PIN wird per HTTP an den Server geschickt. Der Server bindet auf 0.0.0.0,
+ohne TLS. Nur im vertrauenswürdigen Netz betreiben oder über HTTPS-Reverse-Proxy.

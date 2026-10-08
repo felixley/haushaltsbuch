@@ -24,6 +24,8 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from web import sync
+
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
 
@@ -265,6 +267,58 @@ def create_app() -> FastAPI:
             }
             for r in rows
         ]
+
+    # --- Bankabruf (FinTS) ------------------------------------------
+    # PIN kommt nur aus dem Request, lebt im Job-Speicher und wird nicht gespeichert.
+    @app.get("/api/sync/banks")
+    def sync_banks():
+        return sync.banks_status()
+
+    @app.post("/api/sync", status_code=202)
+    def start_sync(body: dict):
+        try:
+            job = sync.start_job(
+                bank=str(body.get("bank", "")),
+                pin=str(body.get("pin", "")),
+                days=int(body.get("days", 100)),
+                db_path=DB_PATH,
+            )
+        except sync.SyncError as e:
+            code = 409 if "läuft bereits" in str(e) else 400
+            raise HTTPException(code, str(e))
+        finally:
+            body.pop("pin", None)  # Klartext-PIN nicht im Speicher halten
+        return job.public()
+
+    @app.get("/api/sync/{job_id}")
+    def sync_status(job_id: str):
+        job = sync.get_job(job_id)
+        if job is None:
+            raise HTTPException(404, "Abruf nicht gefunden")
+        return job.public()
+
+    @app.post("/api/sync/{job_id}/input")
+    def sync_input(job_id: str, body: dict):
+        job = sync.get_job(job_id)
+        if job is None:
+            raise HTTPException(404, "Abruf nicht gefunden")
+        value = {k: v for k, v in body.items() if k in ("tan", "index")}
+        try:
+            sync.submit_input(job, value)
+        except sync.SyncError as e:
+            raise HTTPException(409, str(e))
+        return {"ok": True}
+
+    @app.post("/api/sync/{job_id}/cancel")
+    def sync_cancel(job_id: str):
+        job = sync.get_job(job_id)
+        if job is None:
+            raise HTTPException(404, "Abruf nicht gefunden")
+        try:
+            sync.cancel_job(job)
+        except sync.SyncError as e:
+            raise HTTPException(409, str(e))
+        return {"ok": True}
 
     return app
 

@@ -80,6 +80,28 @@
     </div>
   </div>
 
+  <!-- Bankabruf (FinTS) -->
+  <div class="bg-white rounded-xl shadow p-4 mt-6">
+    <div class="flex flex-wrap justify-between items-center gap-2 mb-3">
+      <h2 class="font-semibold text-slate-700">Bankabruf (FinTS)</h2>
+      <span class="text-xs text-slate-400">PIN wird nur für diesen Abruf verwendet und nicht gespeichert</span>
+    </div>
+    <form id="sync-form" autocomplete="off" class="grid grid-cols-2 md:grid-cols-5 gap-2 items-end">
+      <label class="text-sm col-span-1">Bank
+        <select id="sync-bank" class="border rounded px-2 py-2 text-sm w-full"></select>
+      </label>
+      <label class="text-sm col-span-1">Zeitraum (Tage)
+        <input id="sync-days" type="number" min="1" max="365" value="100" class="border rounded px-2 py-2 text-sm w-full">
+      </label>
+      <label class="text-sm col-span-1">PIN
+        <input id="sync-pin" type="password" autocomplete="new-password" name="fints-pin" class="border rounded px-2 py-2 text-sm w-full">
+      </label>
+      <button id="sync-start" type="submit" class="px-4 py-2.5 bg-blue-600 text-white rounded text-sm disabled:opacity-50">Umsätze abrufen</button>
+    </form>
+    <div id="sync-status" class="text-sm text-slate-600 mt-3"></div>
+    <div id="sync-prompt" class="hidden mt-3 border rounded-lg p-3 bg-slate-50 text-sm"></div>
+  </div>
+
   <!-- Kategorien -->
   <div class="bg-white rounded-xl shadow p-4 mt-6 md:w-1/2">
     <h2 class="font-semibold text-slate-700 mb-2">Kategorien</h2>
