@@ -1,0 +1,27 @@
+[project]
+name = "finance-tracker-test"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fints>=5.0.0",
+    "ipykernel>=7.3.0",
+    "pandas>=3.0.6",
+    "pillow>=12.3.0",
+    "python-dotenv>=1.2.4",
+]
+
+[project.scripts]
+finance-tracker = "finance_tracker:main"
+
+[build-system]
+requires = ["uv_build>=0.12.19,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+# Das Projekt heißt "finance-tracker-test", das importierbare Modul aber
+# "finance_tracker" (siehe src/finance_tracker). Ohne diese Angabe würde
+# uv_build ein Modul "src/finance_tracker_test/__init__.py" erwarten.
+module-name = "finance_tracker"
+module-root = "src"
