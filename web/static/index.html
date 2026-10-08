@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Haushaltsbuch</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="bg-slate-100 min-h-screen">
+<div class="max-w-7xl mx-auto p-3 sm:p-6">
+  <header class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-6">
+    <h1 class="text-xl sm:text-2xl font-bold text-slate-800">Haushaltsbuch</h1>
+    <span class="text-xs sm:text-sm text-slate-500">Daten aus der lokalen Datenbank</span>
+  </header>
+
+  <!-- KPI-Cards -->
+  <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+    <div class="bg-white rounded-xl shadow p-4">
+      <div class="text-sm text-slate-500" title="Summe aller gespeicherten Umsätze (Kontostand wird noch nicht gespeichert)">Saldo (Summe Umsätze)</div>
+      <div id="kpi-balance" class="text-2xl font-bold text-slate-800">–</div>
+    </div>
+    <div class="bg-white rounded-xl shadow p-4">
+      <div class="text-sm text-slate-500">Einkommen (Monat)</div>
+      <div id="kpi-income" class="text-2xl font-bold text-green-600">–</div>
+    </div>
+    <div class="bg-white rounded-xl shadow p-4">
+      <div class="text-sm text-slate-500">Ausgaben (Monat)</div>
+      <div id="kpi-expenses" class="text-2xl font-bold text-red-600">–</div>
+    </div>
+    <div class="bg-white rounded-xl shadow p-4">
+      <div class="text-sm text-slate-500">Netto-Cashflow</div>
+      <div id="kpi-net" class="text-2xl font-bold text-slate-800">–</div>
+    </div>
+  </div>
+
+  <!-- Charts -->
+  <div class="grid md:grid-cols-3 gap-4 mb-6">
+    <div class="bg-white rounded-xl shadow p-4 md:col-span-2">
+      <div class="flex justify-between items-center mb-2">
+        <h2 class="font-semibold text-slate-700">Einnahmen vs. Ausgaben</h2>
+        <div class="flex gap-1 flex-wrap">
+          <button data-gran="monthly" class="gran-btn px-3 py-1 text-sm rounded bg-blue-600 text-white">Monatlich</button>
+          <button data-gran="yearly" class="gran-btn px-3 py-1 text-sm rounded bg-slate-200 text-slate-700">Jährlich</button>
+        </div>
+      </div>
+      <canvas id="timeline-chart" height="120"></canvas>
+    </div>
+    <div class="bg-white rounded-xl shadow p-4">
+      <h2 class="font-semibold text-slate-700 mb-2">Ausgaben nach Kategorie</h2>
+      <canvas id="breakdown-chart" height="220"></canvas>
+    </div>
+  </div>
+
+  <!-- Transaktionstabelle -->
+  <div class="bg-white rounded-xl shadow p-4">
+    <div class="grid grid-cols-2 sm:flex sm:flex-wrap gap-2 mb-4 items-center">
+      <input id="f-search" placeholder="Suche Partner/Zweck…" class="border rounded px-3 py-2 text-sm col-span-2 sm:col-span-1 sm:flex-1 min-w-0">
+      <select id="f-category" class="border rounded px-2 py-2.5 text-sm min-w-0"><option value="">Alle Kategorien</option></select>
+      <select id="f-account" class="border rounded px-2 py-2.5 text-sm min-w-0"><option value="">Alle Konten</option></select>
+      <input id="f-from" type="date" class="border rounded px-2 py-2 text-sm min-w-0">
+      <input id="f-to" type="date" class="border rounded px-2 py-2 text-sm min-w-0">
+      <button id="f-apply" class="col-span-2 sm:col-span-1 px-4 py-2.5 bg-slate-700 text-white rounded text-sm">Filtern</button>
+    </div>
+    <div class="overflow-x-auto -mx-4 px-4">
+    <table class="w-full text-sm">
+      <thead class="text-left text-slate-500 border-b">
+        <tr><th class="py-2 whitespace-nowrap">Datum</th><th>Partner</th><th class="hidden sm:table-cell">Zweck</th><th class="text-right">Betrag</th><th class="hidden sm:table-cell">Konto</th><th>Kategorie</th></tr>
+      </thead>
+      <tbody id="tx-body"></tbody>
+    </table>
+    </div>
+    <div class="flex justify-between items-center mt-3 text-sm text-slate-500">
+      <span id="tx-count"></span>
+      <div class="flex gap-2">
+        <button id="prev-page" class="px-4 py-2 border rounded active:bg-slate-200">‹</button>
+        <button id="next-page" class="px-4 py-2 border rounded active:bg-slate-200">›</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Kategorien -->
+  <div class="bg-white rounded-xl shadow p-4 mt-6 md:w-1/2">
+    <h2 class="font-semibold text-slate-700 mb-2">Kategorien</h2>
+    <ul id="cat-list" class="text-sm divide-y"></ul>
+    <div class="flex gap-2 mt-3">
+      <input id="new-cat-name" placeholder="Neue Kategorie" class="border rounded px-2 py-1 text-sm flex-1">
+      <select id="new-cat-type" class="border rounded text-sm"><option value="expense">Ausgabe</option><option value="income">Einnahme</option></select>
+      <button id="add-cat" class="px-3 py-1 bg-blue-600 text-white rounded text-sm">+</button>
+    </div>
+  </div>
+</div>
+
+<div id="error-banner" class="hidden fixed bottom-4 left-1/2 -translate-x-1/2 bg-red-600 text-white px-4 py-2 rounded-lg shadow"></div>
+<script src="/static/main.js"></script>
+</body>
+</html>

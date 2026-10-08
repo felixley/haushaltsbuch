@@ -23,12 +23,22 @@ PRAGMA foreign_keys = ON;
 -- ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS accounts (
     iban           TEXT PRIMARY KEY,   -- IBAN (eindeutiger Schlüssel)
+    bank_name      TEXT,               -- Anzeigename der Bank (fuer Dashboard)
     bic            TEXT,               -- BIC
     accountnumber  TEXT,               -- Kontonummer
     subaccount     TEXT,               -- Unterkonto
     blz            TEXT,               -- Bankleitzahl
     created_at     TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at     TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- ------------------------------------------------------------
+-- Kategorien (fuer Dashboard-Auswertung)
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS categories (
+    id    INTEGER PRIMARY KEY AUTOINCREMENT,
+    name  TEXT NOT NULL UNIQUE,
+    type  TEXT NOT NULL CHECK (type IN ('income', 'expense'))
 );
 
 -- ------------------------------------------------------------
@@ -64,6 +74,9 @@ CREATE TABLE IF NOT EXISTS transactions (
     -- + Referenzen). Verhindert, dass derselbe Umsatz bei einem
     -- erneuten Import doppelt angelegt wird.
     dedup_hash           TEXT UNIQUE,
+
+    -- Kategorie (vom Dashboard gesetzt, NULL = nicht zugeordnet)
+    category_id          INTEGER REFERENCES categories(id) ON DELETE SET NULL,
 
     created_at           TEXT NOT NULL DEFAULT (datetime('now'))
 );

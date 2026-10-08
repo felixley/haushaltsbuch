@@ -109,3 +109,30 @@ python db_anzeigen.py --raw                # komplette Roh-JSON-Daten zeigen
 Die Ausgabe erfolgt als pandas-DataFrame-Tabelle im Terminal. Die
 Umsatzansicht enthält zusätzlich die `account_iban` und den `subaccount`
 (z. B. „Girokonto“), damit sich jeder Umsatz seinem Konto zuordnen lässt.
+
+## Dashboard (Web-Frontend)
+
+Das Dashboard (übernommen aus `finance-tracker`) liest direkt aus der
+SQLite-DB (`DB_PATH`, Default `finance.db`).
+
+```bash
+uv run uvicorn web.app:app --host 0.0.0.0 --port 4713
+# -> http://127.0.0.1:4713
+```
+
+Enthalten: Kennzahlen, Einnahmen/Ausgaben (monatlich/jährlich), Kategorie-Auswertung,
+Umsatztabelle mit Filtern (Suche, Kategorie, Konto, Zeitraum, Paging),
+Kategorien verwalten, Kategorie je Umsatz setzen.
+
+Noch nicht im Dashboard (aus finance-tracker bewusst zurückgestellt):
+Personen, Kategorie-Regeln (automatisches Lernen), Konto-Salden, FinTS-Verbindungs-UI, Sync-Button.
+
+### Testdaten aus finance-tracker übernehmen
+
+```bash
+uv run python migration/import_finance_tracker.py \
+    --source /opt/data/workspace/finance-tracker/data/finance.db --target finance.db
+```
+
+Achtung: Die Quelle enthält Mock-Daten (`source: mock`), keine echten Bankumsätze.
+Import ist idempotent (Duplikate werden übersprungen).
