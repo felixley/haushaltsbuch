@@ -275,7 +275,8 @@ def test_empty_pin_rejected(client):
     assert r.status_code == 400
 
 
-def test_login_uses_empty_customer_id_after_system_id_sync(client):
+def test_default_login_does_not_touch_customer_id(client, monkeypatch):
+    monkeypatch.delenv("FINTS_CUSTOMER_ID_WORKAROUND", raising=False)
     FakeClient.scenario = "tan"
     job_id = start(client)
     wait_for(client, job_id, {"tan_required"})
@@ -283,12 +284,34 @@ def test_login_uses_empty_customer_id_after_system_id_sync(client):
     wait_for(client, job_id, {"tan_required"})
     client.post(f"/api/sync/{job_id}/input", json={"tan": "2"})
     wait_for(client, job_id, {"done", "error"})
-    # erst leer probieren (schlägt fehl), dann mit user_id (ok), danach hart leer
+    assert FakeClient.sysid_calls == []          # Standard = CLI-Verhalten
+    assert FakeClient.login_customer_ids == [None]
+
+
+def test_workaround_flag_uses_empty_customer_id(client, monkeypatch):
+    monkeypatch.setenv("FINTS_CUSTOMER_ID_WORKAROUND", "1")
+    FakeClient.scenario = "tan"
+    job_id = start(client)
+    wait_for(client, job_id, {"tan_required"})
+    client.post(f"/api/sync/{job_id}/input", json={"tan": "1"})
+    wait_for(client, job_id, {"tan_required"})
+    client.post(f"/api/sync/{job_id}/input", json={"tan": "2"})
+    wait_for(client, job_id, {"done", "error"})
     assert FakeClient.sysid_calls == ["", "testuser"]
     assert FakeClient.login_customer_ids == [""]
 
 
-def test_create_client_falls_back_to_user_id(monkeypatch):
+def test_create_client_default_is_plain(monkeypatch):
+    monkeypatch.setattr(fints_session, "FinTS3PinTanClient", FakeClient)
+    monkeypatch.delenv("FINTS_CUSTOMER_ID_WORKAROUND", raising=False)
+    FakeClient.sysid_calls = []
+    c = fints_session.create_client("20041133", "testuser", PIN, "https://x")
+    assert FakeClient.sysid_calls == []
+    assert c.customer_id is None
+
+
+def test_create_client_workaround_falls_back_to_user_id(monkeypatch):
+    monkeypatch.setenv("FINTS_CUSTOMER_ID_WORKAROUND", "1")
     monkeypatch.setattr(fints_session, "FinTS3PinTanClient", FakeClient)
     FakeClient.sysid_calls = []
     c = fints_session.create_client("20041133", "testuser", PIN, "https://x")
@@ -298,6 +321,7 @@ def test_create_client_falls_back_to_user_id(monkeypatch):
 
 
 def test_create_client_raises_when_no_system_id(monkeypatch):
+    monkeypatch.setenv("FINTS_CUSTOMER_ID_WORKAROUND", "1")
     class Broken(FakeClient):
         def _ensure_system_id(self):
             raise ValueError("boom")
