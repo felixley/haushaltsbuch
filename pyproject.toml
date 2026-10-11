@@ -14,6 +14,14 @@ dependencies = [
     "uvicorn>=0.54.0",
 ]
 
+[dependency-groups]
+# Nur für Entwicklung/Tests: `uv sync` installiert diese Gruppe mit.
+# Ohne sie fallen pytest/httpx bei jedem `uv sync` aus dem venv -> `pytest tests` schlägt fehl.
+dev = [
+    "pytest>=9.0.0",
+    "httpx>=0.28.0",
+]
+
 [project.scripts]
 finance-tracker = "finance_tracker:main"
 
