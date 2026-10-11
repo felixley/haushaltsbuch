@@ -17,6 +17,7 @@ from fints.client import NeedTANResponse
 
 import web.app as webapp
 from web import sync
+import fints_session
 
 PIN = "geheim4711"
 
@@ -51,14 +52,26 @@ class FakeClient:
     scenario = "tan"           # tan | decoupled | choice | wrong_pin
     seen_pins: list = []       # zum Prüfen, mit welcher PIN eingeloggt wurde
     sent_tans: list = []
+    sysid_calls: list = []
+    login_customer_ids: list = []
 
     def __init__(self, blz, user, pin, server, product_id=None, **kw):
         if self.scenario == "wrong_pin" and pin != PIN:
             raise RuntimeError("PIN ungültig (9942)")
         FakeClient.seen_pins.append(pin)
+        self.user_id = user
+        self.customer_id = None
+        self.system_id = "0"
         self.selected_tan_medium = None
         self.init_tan_response = None
         self._media = None
+
+    # System-ID-Sync wie in der Bibliothek: mit leerer customer_id -> ValueError, mit user_id -> ok
+    def _ensure_system_id(self):
+        FakeClient.sysid_calls.append(self.customer_id)
+        if self.customer_id == "":
+            raise ValueError("no HISYN4 without customer_id")
+        self.system_id = "SYS123"
 
     # Login-/Konfigurationsschritte
     def fetch_tan_mechanisms(self):
@@ -82,6 +95,7 @@ class FakeClient:
         self.selected_tan_medium = getattr(m, "tan_medium_name", m)
 
     def __enter__(self):
+        FakeClient.login_customer_ids.append(self.customer_id)
         if self.scenario in ("tan", "decoupled"):
             self.init_tan_response = make_need_tan(decoupled=self.scenario == "decoupled")
         return self
@@ -114,12 +128,14 @@ def env_and_db(tmp_path, monkeypatch):
     monkeypatch.setenv("COMDIRECT_USERNAME", "testuser")
     monkeypatch.setenv("COMDIRECT_HBCI", "https://example.invalid/fints")
     monkeypatch.setenv("COMDIRECT_TAN_MECHANISM", "911")
-    monkeypatch.setattr(sync, "FinTS3PinTanClient", FakeClient)
+    monkeypatch.setattr(fints_session, "FinTS3PinTanClient", FakeClient)
     db = tmp_path / "test.db"
     monkeypatch.setattr(webapp, "DB_PATH", db)
     monkeypatch.setattr(sync, "_jobs", {})
     FakeClient.seen_pins = []
     FakeClient.sent_tans = []
+    FakeClient.sysid_calls = []
+    FakeClient.login_customer_ids = []
     yield db
 
 
@@ -257,3 +273,36 @@ def test_unconfigured_bank_rejected(client, monkeypatch):
 def test_empty_pin_rejected(client):
     r = client.post("/api/sync", json={"bank": "comdirect", "pin": ""})
     assert r.status_code == 400
+
+
+def test_login_uses_empty_customer_id_after_system_id_sync(client):
+    FakeClient.scenario = "tan"
+    job_id = start(client)
+    wait_for(client, job_id, {"tan_required"})
+    client.post(f"/api/sync/{job_id}/input", json={"tan": "1"})
+    wait_for(client, job_id, {"tan_required"})
+    client.post(f"/api/sync/{job_id}/input", json={"tan": "2"})
+    wait_for(client, job_id, {"done", "error"})
+    # erst leer probieren (schlägt fehl), dann mit user_id (ok), danach hart leer
+    assert FakeClient.sysid_calls == ["", "testuser"]
+    assert FakeClient.login_customer_ids == [""]
+
+
+def test_create_client_falls_back_to_user_id(monkeypatch):
+    monkeypatch.setattr(fints_session, "FinTS3PinTanClient", FakeClient)
+    FakeClient.sysid_calls = []
+    c = fints_session.create_client("20041133", "testuser", PIN, "https://x")
+    assert c.customer_id == ""
+    assert c.system_id == "SYS123"
+    assert FakeClient.sysid_calls == ["", "testuser"]
+
+
+def test_create_client_raises_when_no_system_id(monkeypatch):
+    class Broken(FakeClient):
+        def _ensure_system_id(self):
+            raise ValueError("boom")
+    monkeypatch.setattr(fints_session, "FinTS3PinTanClient", Broken)
+    monkeypatch.setattr(fints_session, "SYSTEM_ID_UNASSIGNED", "0")
+    Broken.system_id = "0"
+    with pytest.raises(fints_session.FinTSSetupError):
+        fints_session.create_client("20041133", "testuser", PIN, "https://x")

@@ -34,8 +34,7 @@ from fints.client import FinTS3PinTanClient, NeedTANResponse
 from dotenv import load_dotenv
 load_dotenv()
 
-# FinTS-Produkt-ID (wird von CLI und Web-Abruf gemeinsam genutzt)
-PRODUCT_ID = "6151256F3D4F9975B877BD4A2"
+from fints_session import create_client  # gemeinsamer Verbindungsaufbau (wie finance-tracker)
 
 SCHEMA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "schema.sql")
 
@@ -383,13 +382,8 @@ def main():
     password = getpass.getpass(f"PIN für {bank} ({username}): ")
 
     # Nutzen Sie die funktionierende Produkt-ID
-    product_id = PRODUCT_ID
 
-    client = FinTS3PinTanClient(blz,
-                                username,
-                                password,
-                                hbci_backend,
-                                product_id=product_id)
+    client = create_client(blz, username, password, hbci_backend)
 
     # VOR dem Login-Dialog: Verfügbare TAN-Medien laden und das Verfahren setzen
     client.fetch_tan_mechanisms()

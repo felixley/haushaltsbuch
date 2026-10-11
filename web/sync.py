@@ -24,11 +24,11 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from fints.client import FinTS3PinTanClient, NeedTANResponse
+from fints.client import NeedTANResponse
 from fints.utils import decode_phototan_image
 
+from fints_session import create_client
 from transaktionen_speichern import (
-    PRODUCT_ID,
     apply_schema,
     insert_transactions,
     upsert_account,
@@ -247,8 +247,7 @@ def _run(job: Job, cfg: dict, pin: str, days: int, db_path: Path) -> None:
     client = None
     secret = pin  # nur für die Maskierung eventueller Fehlertexte
     try:
-        client = FinTS3PinTanClient(cfg["blz"], cfg["username"], pin, cfg["hbci"],
-                                    product_id=PRODUCT_ID)
+        client = create_client(cfg["blz"], cfg["username"], pin, cfg["hbci"])
         pin = None  # Referenz im Thread verwerfen; der Client hält sie für den Login
         job.client = client
         client.fetch_tan_mechanisms()
