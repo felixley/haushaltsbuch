@@ -21,7 +21,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from web import sync
@@ -296,6 +296,27 @@ def create_app() -> FastAPI:
         if job is None:
             raise HTTPException(404, "Abruf nicht gefunden")
         return job.public()
+
+    @app.get("/api/sync/{job_id}/challenge")
+    def sync_challenge(job_id: str):
+        """Liefert die anstehende photoTAN-Grafik direkt als Bild – kein Dateischreiben."""
+        job = sync.get_job(job_id)
+        if job is None:
+            raise HTTPException(404, "Abruf nicht gefunden")
+        with job.lock:
+            challenge = job.challenge
+            mime = challenge[0] if challenge else None
+            data = challenge[1] if challenge else None
+        if data is None:
+            raise HTTPException(404, "Aktuell liegt keine Challenge an")
+        return Response(
+            content=data,
+            media_type=mime,
+            headers={
+                "Cache-Control": "no-store",
+                "Content-Disposition": "inline",
+            },
+        )
 
     @app.post("/api/sync/{job_id}/input")
     def sync_input(job_id: str, body: dict):

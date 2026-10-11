@@ -143,6 +143,15 @@ Im Dashboard unter „Bankabruf (FinTS)“: Bank wählen, PIN eingeben, „Umsä
 - Die PIN wird nur für diesen Abruf verwendet, nicht gespeichert und nach dem Absenden
   aus dem Feld entfernt. Sie erscheint nicht im Log und nicht in der Datenbank.
 - Bei Bedarf fragt die GUI nach TAN-Medium, TAN, photoTAN oder App-Freigabe.
+- **photoTAN (z. B. comdirect):** Die Bank schickt eine Grafik, die mit der
+  photoTAN-App gescannt/abgelesen werden muss. Die Grafik wird zum einen klein
+  als `data:`-URL im Prompt angezeigt, zum anderen steht sie unter
+  `GET /api/sync/{job_id}/challenge` als eigenes Bild (Content-Type = Bild-MIME,
+  Cache-Control: no-store) bereit – z. B. per Rechtsklick „in neuem Tab öffnen“
+  für bessere Auflösung. Die TAN aus der App wird dann wie gewohnt im
+  Eingabefeld eingetragen. Der Prompt trägt die Felder `seq` (fortlaufend),
+  `image_url` und `mime`, sobald eine Grafik anliegt. Nach der Eingabe ist die
+  Grafik verbraucht (die Bild-URL liefert dann 404).
 - Bank-Konfiguration (BLZ, Benutzerkennung, FinTS-URL, TAN-Verfahren) kommt weiterhin aus der `.env`
   (siehe `.env.example`). Ohne diese Werte ist die Bank in der GUI gesperrt.
 - Pro Zeitpunkt läuft nur ein Abruf.

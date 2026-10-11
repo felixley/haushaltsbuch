@@ -17,6 +17,7 @@ import base64
 import datetime as dt
 import os
 import queue
+import re
 import sqlite3
 import threading
 import time
@@ -90,6 +91,8 @@ class Job:
     prompt: dict | None = None       # Inhalt für die GUI bei Eingabebedarf
     result: dict | None = None
     error: str | None = None
+    challenge: tuple[str, bytes] | None = None   # (mime, Bildbytes) des anstehenden photoTAN
+    prompt_seq: int = 0                          # fortlaufend, kommt in jeden prompt
     created: float = field(default_factory=time.time)
     finished: float | None = None
     inbox: queue.Queue = field(default_factory=queue.Queue, repr=False)
@@ -171,7 +174,64 @@ def cancel_job(job: Job) -> None:
 # ------------------------------------------------------------------
 # FinTS-Ablauf
 # ------------------------------------------------------------------
-def _wait_input(job: Job, status: str, prompt: dict) -> dict:
+def challenge_image(resp) -> tuple[str, bytes] | None:
+    """Extrahiert aus einer NeedTANResponse ein (mime, Bildbytes)-Tupel für photoTAN.
+
+    Reihenfolge der Quellen:
+      1. challenge_matrix (falls mime mit 'image/' beginnt)
+      2. challenge_hhduc – Bytes, ASCII-String oder base64-kodierter String,
+         aufgelöst über decode_phototan_image
+      3. base64-PNG direkt im challenge-Text (iVBORw0KGgo...)
+
+    Wirft nie eine Exception nach außen und loggt keine Geheimnisse.
+    Ergebnis wird nur akzeptiert, wenn der MIME-Typ mit 'image/' beginnt.
+    """
+    try:
+        # 1. Matrix-Code-Challenge
+        if getattr(resp, "challenge_matrix", None):
+            mime, data = resp.challenge_matrix
+            if isinstance(mime, str) and mime.startswith("image/") and isinstance(data, (bytes, bytearray)):
+                return (mime, bytes(data))
+
+        # 2. HHD_UC-Challenge
+        hhduc = getattr(resp, "challenge_hhduc", None)
+        if hhduc:
+            payload = hhduc
+            if isinstance(hhduc, str):
+                try:
+                    payload = base64.b64decode(hhduc.encode() + b"=" * (-len(hhduc) % 4), validate=True)
+                except Exception:
+                    payload = hhduc.encode("iso-8859-1")
+            if isinstance(payload, (bytes, bytearray)):
+                decoded = decode_phototan_image(bytes(payload))
+                mime = decoded.get("mime_type", "")
+                if isinstance(mime, str) and mime.startswith("image/"):
+                    return (mime, decoded.get("image", b""))
+
+        # 3. base64-PNG direkt im Challenge-Text suchen
+        text = getattr(resp, "challenge", "") or ""
+        if isinstance(text, str) and "iVBOR" in text:
+            b64 = re.search(r"iVBOR[A-Za-z0-9+/=]+", text)
+            if b64:
+                raw = base64.b64decode(b64.group(0).encode() + b"=" * (-(len(b64.group(0)) % 4) % 4), validate=True)
+                if raw.startswith(b"\x89PNG\r\n\x1a\n"):
+                    return ("image/png", raw)
+    except Exception:
+        pass  # Bild nicht dekodierbar -> nur Text anzeigen
+    return None
+
+
+def _wait_input(job: Job, status: str, prompt: dict, resp=None) -> dict:
+    with job.lock:
+        job.prompt_seq += 1
+        seq = job.prompt_seq
+    prompt = dict(prompt)
+    prompt["seq"] = seq
+    image = challenge_image(resp) if resp is not None else None
+    if image:
+        job.challenge = image
+        prompt["image_url"] = f"/api/sync/{job.id}/challenge"
+        prompt["mime"] = image[0]
     job.update(status=status, prompt=prompt)
     try:
         value = job.inbox.get(timeout=INPUT_TIMEOUT_S)
@@ -179,21 +239,16 @@ def _wait_input(job: Job, status: str, prompt: dict) -> dict:
         raise SyncError("Keine Eingabe innerhalb von 5 Minuten – Abruf abgebrochen.")
     if value.get("_cancel"):
         raise SyncError("Abruf abgebrochen.")
-    job.update(status="running", prompt=None)
+    job.update(status="running", prompt=None, challenge=None)
     return value
 
 
 def _challenge_prompt(resp: NeedTANResponse) -> dict:
     image = None
-    try:
-        if resp.challenge_matrix:
-            mime, data = resp.challenge_matrix[0], resp.challenge_matrix[1]
-            image = (mime, data)
-        elif resp.challenge_hhduc:
-            decoded = decode_phototan_image(resp.challenge_hhduc)
-            image = (decoded["mime_type"], decoded["image"])
-    except Exception:
-        image = None  # Bild nicht dekodierbar -> nur Text anzeigen
+    img = challenge_image(resp)
+    if img:
+        mime, data = img
+        image = (mime, data)
     return {
         "type": "tan",
         "text": resp.challenge or "",
@@ -206,7 +261,7 @@ def _challenge_prompt(resp: NeedTANResponse) -> dict:
 def _resolve(job: Job, client, resp):
     """Wiederholt Eingabe + send_tan, solange die Bank eine Freigabe verlangt."""
     while isinstance(resp, NeedTANResponse):
-        value = _wait_input(job, "tan_required", _challenge_prompt(resp))
+        value = _wait_input(job, "tan_required", _challenge_prompt(resp), resp)
         if resp.decoupled:
             tan = ""  # Bei App-Freigabe wird die TAN ignoriert (wie in der Bibliothek)
         else:
@@ -282,9 +337,10 @@ def _run(job: Job, cfg: dict, pin: str, days: int, db_path: Path) -> None:
 
         job.update(status="done", result={"accounts": per_account}, prompt=None)
     except Exception as exc:  # noqa: BLE001 – Fehler gehen als Text an die GUI
-        job.update(status="error", error=_safe_message(exc, secret), prompt=None)
+        job.update(status="error", error=_safe_message(exc, secret), prompt=None,
+                   challenge=None)
     finally:
         pin = None
         secret = None
-        job.update(finished=time.time())
+        job.update(finished=time.time(), prompt=None, challenge=None)
         job.client = None

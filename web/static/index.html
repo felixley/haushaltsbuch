@@ -114,6 +114,28 @@
   </div>
 </div>
 
+<!-- photoTAN-Grafik Modal -->
+<div id="challenge-modal" class="hidden fixed inset-0 z-50">
+  <div id="challenge-backdrop" class="absolute inset-0 bg-black/70"></div>
+  <div class="absolute inset-0 flex items-center justify-center p-2 sm:p-5">
+    <div class="relative bg-white rounded-xl shadow-2xl w-full max-w-3xl flex flex-col max-h-[92vh]">
+      <div class="flex flex-wrap justify-between items-center gap-2 p-3 border-b">
+        <div class="flex flex-wrap gap-2">
+          <button id="challenge-share" type="button" class="hidden px-3 py-1.5 bg-blue-600 text-white rounded text-sm">Bild teilen</button>
+          <button id="challenge-zoom" type="button" class="px-3 py-1.5 border rounded text-sm">2x</button>
+        </div>
+        <div class="flex gap-2">
+          <button id="challenge-newtab" type="button" class="px-3 py-1.5 border rounded text-sm">In neuem Tab öffnen</button>
+          <button id="challenge-close" type="button" aria-label="Schließen" class="px-3 py-1.5 bg-slate-200 rounded text-sm">✕</button>
+        </div>
+      </div>
+      <div class="overflow-auto p-3">
+        <img id="challenge-img" alt="photoTAN" class="mx-auto block max-h-[80vh] max-w-full" style="image-rendering:pixelated;">
+      </div>
+    </div>
+  </div>
+</div>
+
 <div id="error-banner" class="hidden fixed bottom-4 left-1/2 -translate-x-1/2 bg-red-600 text-white px-4 py-2 rounded-lg shadow"></div>
 <script src="/static/main.js"></script>
 </body>

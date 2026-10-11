@@ -6,6 +6,7 @@ Fake ersetzt, der die Antworten der Bank nachbildet.
 
 from __future__ import annotations
 
+import base64
 import datetime as dt
 import sqlite3
 import time
@@ -43,6 +44,22 @@ class _TanRequest:
 def make_need_tan(text="Bitte TAN eingeben", decoupled=False):
     r = NeedTANResponse(None, _TanRequest(text))
     r.decoupled = decoupled
+    return r
+
+
+# 2 Byte MIME-Länge (big-endian) + MIME + 2 Byte Bildlänge + Bild
+def make_hhduc_payload(mime: str, image: bytes) -> bytes:
+    mb = mime.encode("iso-8859-1")
+    return len(mb).to_bytes(2, "big") + mb + len(image).to_bytes(2, "big") + image
+
+
+PNG_BYTES = (b"\x89PNG\r\n\x1a\n" + b"0123456789" * 8)
+
+
+def make_hhduc_response(mime="image/png", image=PNG_BYTES):
+    r = make_need_tan("Bitte photoTAN-Grafik scannen")
+    r.challenge_matrix = None
+    r.challenge_hhduc = make_hhduc_payload(mime, image)
     return r
 
 
@@ -98,6 +115,8 @@ class FakeClient:
         FakeClient.login_customer_ids.append(self.customer_id)
         if self.scenario in ("tan", "decoupled"):
             self.init_tan_response = make_need_tan(decoupled=self.scenario == "decoupled")
+        elif self.scenario == "phototan":
+            self.init_tan_response = make_hhduc_response()
         return self
 
     def __exit__(self, *a):
@@ -330,3 +349,77 @@ def test_create_client_raises_when_no_system_id(monkeypatch):
     Broken.system_id = "0"
     with pytest.raises(fints_session.FinTSSetupError):
         fints_session.create_client("20041133", "testuser", PIN, "https://x")
+
+
+# --- photoTAN: challenge_image + Bild-URL ------------------------------------
+
+def test_challenge_image_from_hhduc_bytes():
+    r = make_hhduc_response()
+    assert sync.challenge_image(r) == ("image/png", PNG_BYTES)
+
+
+def test_challenge_image_from_hhduc_base64_string():
+    r = make_need_tan("Bitte scannen")
+    r.challenge_matrix = None
+    r.challenge_hhduc = base64.b64encode(make_hhduc_payload("image/png", PNG_BYTES)).decode()
+    assert sync.challenge_image(r) == ("image/png", PNG_BYTES)
+
+
+def test_challenge_image_from_matrix():
+    r = make_need_tan()
+    r.challenge_matrix = ("image/png", PNG_BYTES)
+    r.challenge_hhduc = None
+    assert sync.challenge_image(r) == ("image/png", PNG_BYTES)
+
+
+def test_challenge_image_ignores_non_image_mime():
+    r = make_need_tan()
+    r.challenge_matrix = ("text/plain", b"nope")
+    r.challenge_hhduc = None
+    assert sync.challenge_image(r) is None
+
+
+def test_challenge_image_never_raises_on_garbage():
+    r = make_need_tan()
+    r.challenge_matrix = None
+    r.challenge_hhduc = b"\x00\x01"  # kaputt
+    assert sync.challenge_image(r) is None
+
+
+def test_phototan_end_to_end_image_url_seq_and_challenge_endpoint(client):
+    FakeClient.scenario = "phototan"
+    job_id = start(client)
+    j = wait_for(client, job_id, {"tan_required"})
+    p = j["prompt"]
+    assert p["type"] == "tan"
+    assert p["image_url"] == f"/api/sync/{job_id}/challenge"
+    assert p["mime"] == "image/png"
+    assert p["image"], "data-URL muss weiterhin vorhanden sein"
+    first_seq = p["seq"]
+
+    # Grafik direkt abrufbar
+    r = client.get(f"/api/sync/{job_id}/challenge")
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "image/png"
+    assert r.content == PNG_BYTES
+
+    # zweite Challenge (Umsatzabruf) hat eine andere seq
+    client.post(f"/api/sync/{job_id}/input", json={"tan": "123456"})
+    j2 = wait_for(client, job_id, {"tan_required"})
+    assert j2["prompt"]["seq"] == first_seq + 1
+
+    # nach Eingabe ist die Challenge verbraucht -> 404
+    client.post(f"/api/sync/{job_id}/input", json={"tan": "654321"})
+    wait_for(client, job_id, {"done", "error"})
+    assert client.get(f"/api/sync/{job_id}/challenge").status_code == 404
+
+
+def test_challenge_raw_bytes_never_in_public_state(client):
+    FakeClient.scenario = "phototan"
+    job_id = start(client)
+    j = wait_for(client, job_id, {"tan_required"})
+    # Die base64-data-URL enthält legitimerweise 'iVBORw0KGgo' (PNG-Signatur);
+    # verboten sind nur die ROHEN Bildbytes.
+    assert PNG_BYTES not in str(j).encode()
+    assert "challenge" not in j  # Job-Feld mit Rohbytes ist nicht Teil der public-Antwort
+    assert j["prompt"]["image"].startswith("data:image/png;base64,")

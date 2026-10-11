@@ -198,6 +198,79 @@ $("next-page").addEventListener("click", () => { page++; loadTransactions().catc
 // Die PIN wird nur in das Eingabefeld geschrieben, beim Absenden geleert und nie gespeichert.
 // TAN-/Auswahl-Eingaben werden ebenfalls sofort verworfen.
 let syncJob = null, syncPoll = null, lastPromptKey = null;
+let currentPrompt = null;   // momentan angezeigtes photoTAN-Prompt (für Modal/Nebenfunktionen)
+
+// --- photoTAN-Grafik Modal ---
+// „Bild teilen“ nur aktivieren, wenn navigator.share + canShare mit Dateien verfügbar sind
+const challengeCanShareFiles = (() => {
+  if (typeof navigator.share !== "function" || typeof navigator.canShare !== "function") return false;
+  try { return !!navigator.canShare({files: [new File(["x"], "x.png")]}); } catch { return false; }
+})();
+let challengeZoom = 1, challengeNatW = 0;
+
+function challengeUrl(p) { return (p && (p.image_url || p.image)) || ""; }
+
+function updateChallengeZoom() {
+  const img = $("challenge-img");
+  if (!img) return;
+  if (challengeZoom === 1) {
+    img.style.maxHeight = "80vh";
+    img.style.maxWidth = "100%";
+    img.style.width = "";
+  } else {
+    img.style.maxHeight = "none";
+    img.style.maxWidth = "none";
+    img.style.width = (challengeNatW * challengeZoom) + "px";
+  }
+}
+
+function openImageModal() {
+  const url = challengeUrl(currentPrompt);
+  if (!url) return;
+  const modal = $("challenge-modal");
+  challengeZoom = 1; challengeNatW = 0;
+  const img = $("challenge-img");
+  img.onload = () => { challengeNatW = img.naturalWidth || img.width || 0; updateChallengeZoom(); };
+  img.onerror = null;
+  img.src = url;
+  updateChallengeZoom();
+  $("challenge-share").classList.toggle("hidden", !challengeCanShareFiles);
+  modal.classList.remove("hidden");
+  document.body.style.overflow = "hidden";
+}
+
+function closeImageModal() {
+  const m = $("challenge-modal");
+  if (!m || m.classList.contains("hidden")) return;
+  m.classList.add("hidden");
+  document.body.style.overflow = "";
+}
+
+async function shareChallenge() {
+  const url = challengeUrl(currentPrompt);
+  if (!url) return;
+  try {
+    let blob;
+    if (url.startsWith("data:")) {
+      const m = /^data:([^;,]*)(;base64)?,(.*)$/.exec(url);
+      if (!m) throw new Error("Ungültige Bilddaten");
+      blob = m[2]
+        ? (() => { const bin = atob(m[3]); const arr = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i); return new Blob([arr], {type: m[1] || "image/png"}); })()
+        : new Blob([decodeURIComponent(m[3])], {type: m[1] || "image/png"});
+    } else {
+      const r = await fetch(url);
+      if (!r.ok) throw new Error("Bild konnte nicht geladen werden");
+      blob = await r.blob();
+    }
+    const ext = (blob.type.split("/")[1] || "png").split("+")[0] || "png";
+    const seq = currentPrompt && typeof currentPrompt.seq !== "undefined" ? currentPrompt.seq + "_" : "";
+    const file = new File([blob], `photoTAN_${seq}challenge.${ext}`, {type: blob.type});
+    await navigator.share({files: [file], title: "photoTAN-Challenge", text: currentPrompt && currentPrompt.text ? currentPrompt.text : "photoTAN scannen"});
+  } catch (e) {
+    if (e && (e.name === "AbortError" || e.name === "NotAllowedError")) return; // Nutzer hat abgebrochen
+    showError("Bild konnte nicht geteilt werden: " + (e && e.message ? e.message : "unbekannter Fehler"));
+  }
+}
 
 function setSyncStatus(text, cls = "text-slate-600") {
   const el = $("sync-status");
@@ -206,6 +279,8 @@ function setSyncStatus(text, cls = "text-slate-600") {
 }
 
 function hidePrompt() {
+  closeImageModal();
+  currentPrompt = null;
   const box = $("sync-prompt");
   box.classList.add("hidden");
   box.innerHTML = "";
@@ -216,20 +291,27 @@ function renderPrompt(job) {
   const p = job.prompt;
   if (!p) return hidePrompt();
   box.classList.remove("hidden");
+  currentPrompt = p;
   if (job.status === "tan_required") {
-    const img = p.image ? `<img src="${p.image}" alt="photoTAN" class="my-2 max-w-xs border bg-white">` : "";
+    const imgSrc = challengeUrl(p);
+    const img = imgSrc ? `<img src="${imgSrc}" alt="photoTAN" class="my-2 max-w-xs border bg-white" style="image-rendering:pixelated">` : "";
+    const actions = img ? `
+      <div class="flex flex-wrap gap-2 mt-2">
+        <button id="sync-zoom" type="button" class="px-3 py-1.5 bg-blue-600 text-white rounded text-sm">Grafik groß anzeigen</button>
+        <button id="sync-newtab" type="button" class="px-3 py-1.5 border rounded text-sm">In neuem Tab öffnen</button>
+      </div>` : "";
     const text = escapeHtml(p.text || "");
     if (p.decoupled) {
       box.innerHTML = `
         <div class="mb-2">${text || "Bitte bestätige den Abruf in deiner Banking-App."}</div>
-        ${img}
+        ${img}${actions}
         <button id="sync-ok" class="px-4 py-2 bg-blue-600 text-white rounded text-sm">Bestätigt</button>
         <button id="sync-cancel" class="px-4 py-2 border rounded text-sm ml-2">Abbrechen</button>`;
       $("sync-ok").onclick = () => sendSyncInput({});
     } else {
       box.innerHTML = `
         <div class="mb-2">${text || "Bitte TAN eingeben."}</div>
-        ${img}
+        ${img}${actions}
         <div class="flex gap-2 items-end">
           <input id="sync-tan" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="TAN" class="border rounded px-2 py-2 text-sm">
           <button id="sync-ok" class="px-4 py-2 bg-blue-600 text-white rounded text-sm">Senden</button>
@@ -238,6 +320,8 @@ function renderPrompt(job) {
       $("sync-ok").onclick = () => sendSyncInput({tan: $("sync-tan").value});
       $("sync-tan").focus();
     }
+    const zb = $("sync-zoom"); if (zb) zb.onclick = () => openImageModal();
+    const nb = $("sync-newtab"); if (nb) nb.onclick = () => { const u = challengeUrl(p); if (u) window.open(u, "_blank", "noopener"); };
   } else if (job.status === "choice_required") {
     box.innerHTML = `
       <div class="mb-2">${escapeHtml(p.text)}</div>
@@ -300,9 +384,17 @@ function pollSync() {
         $("sync-start").disabled = false;
       } else if (job.status === "tan_required" || job.status === "choice_required") {
         setSyncStatus(job.status === "choice_required" ? "Auswahl nötig" : "TAN / Freigabe nötig", "text-amber-700");
-        // Nur neu zeichnen, wenn sich der Prompt ändert – sonst geht eine gerade getippte TAN verloren
-        const key = job.status + JSON.stringify(job.prompt);
-        if (key !== lastPromptKey) { lastPromptKey = key; renderPrompt(job); }
+        // Nur neu zeichnen, wenn sich der Prompt ändert – sonst geht eine gerade getippte TAN verloren.
+        // Bevorzugt job.prompt.seq (fortlaufende Nummer), damit auch text-identische Folge-Challenges neu gezeichnet werden.
+        const key = job.prompt && typeof job.prompt.seq !== "undefined"
+          ? "seq:" + job.prompt.seq
+          : job.status + JSON.stringify(job.prompt);
+        if (key !== lastPromptKey) {
+          lastPromptKey = key;
+          currentPrompt = job.prompt;
+          closeImageModal();   // veraltete Grafik aus dem Modal entfernen, wenn eine neue Challenge kommt
+          renderPrompt(job);
+        }
       } else {
         setSyncStatus("Verbinde mit der Bank…");
       }
@@ -348,6 +440,23 @@ async function loadSyncBanks() {
   if (!first) setSyncStatus("Keine Bank in der .env konfiguriert – siehe .env.example", "text-amber-700");
 }
 
+function initImageModal() {
+  const modal = $("challenge-modal");
+  if (!modal) return;
+  $("challenge-close").onclick = closeImageModal;
+  $("challenge-backdrop").onclick = closeImageModal;
+  $("challenge-newtab").onclick = () => { const u = challengeUrl(currentPrompt); if (u) window.open(u, "_blank", "noopener"); };
+  $("challenge-share").onclick = () => { shareChallenge().catch(() => {}); };
+  const zoom = $("challenge-zoom");
+  zoom.textContent = "2x";
+  zoom.onclick = () => {
+    challengeZoom = challengeZoom === 1 ? 2 : 1;
+    zoom.textContent = challengeZoom === 1 ? "2x" : "1x";
+    updateChallengeZoom();
+  };
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeImageModal(); });
+}
+
 function refreshData() {
   loadKpis().catch(e => showError(e.message));
   loadTimeline(document.querySelector(".gran-btn.bg-blue-600")?.dataset.gran || "monthly").catch(e => showError(e.message));
@@ -356,6 +465,7 @@ function refreshData() {
 }
 
 async function init() {
+  initImageModal();
   try {
     await Promise.all([loadKpis(), loadTimeline("monthly"), loadAccounts(), loadSyncBanks()]);
     await refreshCategoriesAndData();
