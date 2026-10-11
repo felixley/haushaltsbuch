@@ -11,6 +11,7 @@ SQLite-Datenbank und einem pandas-Viewer zum Ansehen der Daten.
 | `schema.sql` | SQLite-Schema (`accounts`, `transactions`). |
 | `transaktionen_speichern.py` | Ruft Umsätze ab und schreibt `results[].data` in die SQLite-DB. |
 | `db_anzeigen.py` | Zeigt den Inhalt der Datenbank mit pandas an. |
+| `fints_diagnose.py` | Diagnose bei Loginfehlern (`FinTSClientPINError "PIN wrong?"`): zeigt die Bankcodes beider Kunden-ID-Varianten. |
 | `manuelle_ueberprüfung.py` | Minimales Setup: DB mit pandas einlesen (Spielwiese). |
 
 ## Datenmodell (SQLite)
@@ -160,3 +161,44 @@ Im Dashboard unter „Bankabruf (FinTS)“: Bank wählen, PIN eingeben, „Umsä
 
 Hinweis Transport: Die PIN wird per HTTP an den Server geschickt. Der Server bindet auf 0.0.0.0,
 ohne TLS. Nur im vertrauenswürdigen Netz betreiben oder über HTTPS-Reverse-Proxy.
+
+## Wenn comdirect „PIN wrong?“ meldet
+
+Wenn `transaktionen_speichern.py` oder der GUI-Bankabruf bricht mit
+`FinTSClientPINError: Error during dialog initialization, PIN wrong?` ab.
+Der Fehler tritt oft ERST NACH dem Login-Dialog auf (kein photoTAN-Problem),
+weil die Bank einen Zugangscode (9931/9942/9340/9100/…) zurückmeldet, den
+python-fints generisch als „PIN wrong?“ übersetzt.
+
+Prüf-Reihenfolge:
+
+1. **Kunden-ID-Handling.** comdirect lehnt die Anonymous-Kunden-ID
+   (`9999999999`) im Dialog ab. Lösung: `FINTS_CUSTOMER_ID_WORKAROUND=1` in
+   `.env` setzen – `fints_session.sync_system_id` synchronisiert die
+   System-ID dann zuerst mit leerer, dann mit der echten `user_id` und setzt
+   danach die `customer_id` hart auf `""` (wie `finance-tracker/app/banks/fints_base.py`).
+2. **Benutzerkennung.** Muss aus Kontonummer (nur Zahlen) + Unterkonto
+   bestehen (z. B. `12345678900` für Konto 123456789 + Unterkonto 0)
+   und ohne Leerzeichen/Dezimaltrennzeichen in `COMDIRECT_USERNAME` stehen.
+3. **FinTS-URL.** `COMDIRECT_HBCI` muss exakt `https://fints.comdirect.de/fints`
+   sein (kein `/hbci`-Suffix, kein Schrägstrich am Ende).
+4. **PIN.** Wirklich korrekt? Codes `9942`/`9340`/`9100` deuten auf eine
+   falsche PIN.
+
+**Diagnose-Skript:** Führt beide Varianten (Standard vs. Workaround) mit
+frischem Client aus, zeigt die echten Bank-Codes samt deutscher Bedeutung
+und gibt eine Empfehlung:
+
+```bash
+python fints_diagnose.py            # comdirect
+python fints_diagnose.py --bank dkb
+python fints_diagnose.py --yes      # keine Rückfrage vor Variante B (nur wenn du sicher bist)
+```
+
+Empfiehlt das Skript den Workaround, setze `FINTS_CUSTOMER_ID_WORKAROUND=1`.
+Die PIN wird per `getpass` (ohne Echo) abgefragt, nie ausgegeben oder gespeichert.
+
+**Achtung Kontosperre:** Mehrere Fehlversuche mit falscher PIN können das
+Konto bei comdirect vorübergehend sperren. Das Skript warnt davor und fragt
+nach, bevor es nach einem Zugangsdaten-Fehler (9931/9942/9340/9100)
+automatisch die zweite Variante startet. Nicht unnötig wiederholen.
