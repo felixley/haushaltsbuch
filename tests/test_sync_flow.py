@@ -239,7 +239,12 @@ def test_decoupled_app_confirmation_sends_empty_tan(client):
     j = wait_for(client, job_id, {"tan_required"})
     assert j["prompt"]["decoupled"] is True
     client.post(f"/api/sync/{job_id}/input", json={})
-    wait_for(client, job_id, {"tan_required", "done", "error"})
+    # Auf die Verarbeitung warten: der Status kann kurz noch "tan_required" sein,
+    # obwohl send_tan() im Worker-Thread noch nicht aufgerufen wurde (Race).
+    end = time.time() + 5
+    while time.time() < end and not FakeClient.sent_tans:
+        time.sleep(0.05)
+    assert FakeClient.sent_tans, "send_tan() wurde nicht aufgerufen"
     assert FakeClient.sent_tans[0] == ""
 
 

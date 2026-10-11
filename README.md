@@ -185,20 +185,37 @@ Prüf-Reihenfolge:
 4. **PIN.** Wirklich korrekt? Codes `9942`/`9340`/`9100` deuten auf eine
    falsche PIN.
 
-**Diagnose-Skript:** Führt beide Varianten (Standard vs. Workaround) mit
-frischem Client aus, zeigt die echten Bank-Codes samt deutscher Bedeutung
-und gibt eine Empfehlung:
+**Diagnose-Skript:** Führt pro Variante einen frischen Client aus, zeigt die
+echten Bank-Codes samt deutscher Bedeutung und gibt eine Empfehlung. Ein
+Fehler beim Verbindungsaufbau bricht die Diagnose nicht mehr ab.
 
 ```bash
-python fints_diagnose.py            # comdirect
+python fints_diagnose.py                # comdirect, Variante A (+ B nach Rückfrage)
 python fints_diagnose.py --bank dkb
-python fints_diagnose.py --yes      # keine Rückfrage vor Variante B (nur wenn du sicher bist)
+python fints_diagnose.py --yes          # keine Rückfragen (nur wenn du sicher bist)
+python fints_diagnose.py --variante b   # nur comdirect-konform testen
+python fints_diagnose.py --variante alle# A, dann B, dann C (jeweils mit Rückfrage)
+python fints_diagnose.py --log          # maskierte Roh-Response der Bank zeigen
+python fints_diagnose.py --log-voll     # ungefilterter Log
+python fints_diagnose.py --log-datei log.txt   # kompletter Log in Datei
 ```
 
+**Varianten** (`--variante a|b|c|alle`, Default `a`):
+- **A)** Default – `customer_id = Zugangsnummer`, exakt wie
+  `transaktionen_speichern.py`.
+- **B)** comdirect-konform – `client.customer_id = ""` vor dem ersten Dialog
+  (das Feld Kunden-ID freilassen, siehe
+  <https://www.comdirect.de/cms/sicherheit-software-banking-fints.html>).
+  Genau EIN Login-Versuch, kein vorheriger System-ID-Sync.
+- **C)** finance-tracker-Workaround – `FINTS_CUSTOMER_ID_WORKAROUND=1`. Wird
+  nur auf ausdrückliche Auswahl gestartet, nie automatisch.
+
 Empfiehlt das Skript den Workaround, setze `FINTS_CUSTOMER_ID_WORKAROUND=1`.
-Die PIN wird per `getpass` (ohne Echo) abgefragt, nie ausgegeben oder gespeichert.
+Die PIN wird per `getpass` (ohne Echo) abgefragt, nie ausgegeben oder
+gespeichert — auch im `--log`-Output ist sie maskiert.
 
 **Achtung Kontosperre:** Mehrere Fehlversuche mit falscher PIN können das
 Konto bei comdirect vorübergehend sperren. Das Skript warnt davor und fragt
-nach, bevor es nach einem Zugangsdaten-Fehler (9931/9942/9340/9100)
-automatisch die zweite Variante startet. Nicht unnötig wiederholen.
+nach, bevor es nach einem Zugangsdaten-Fehler (9931/9942/9340/9100) die
+nächste Variante startet. **--yes** überspringt alle Rückfragen. Sobald eine
+Variante erfolgreich ist, startet keine weitere mehr. Nicht unnötig wiederholen.

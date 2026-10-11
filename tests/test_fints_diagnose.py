@@ -8,6 +8,8 @@ auftauchen.
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 from fints.exceptions import FinTSClientPINError
 
@@ -16,6 +18,7 @@ import fints_diagnose
 from fints_session import sync_system_id
 
 PIN = "geheim4711"
+USER = "12345678900"  # comdirect-artige Benutzerkennung (Zugangsnummer)
 
 
 class Pin:
@@ -80,7 +83,7 @@ def test_extract_codes_finds_known_codes_in_order():
 
 class DiagnoseFake:
     """Default-Pfad (customer_id == user_id) -> FinTSClientPINError '9942'.
-    Workaround-Pfad (customer_id == '') -> Erfolg."""
+    comdirect-konform (customer_id == '') -> Erfolg."""
 
     def __init__(self, blz, user, pin, server, product_id=None, **kw):
         self.user_id = user
@@ -95,20 +98,21 @@ class DiagnoseFake:
 
     def fetch_tan_mechanisms(self):
         if self.customer_id == "":
-            return {}                              # Workaround-Pfad: Login ok
+            return {}                              # comdirect-konform: Login ok
         raise FinTSClientPINError(f"9942 – PIN ungültig (Eingabe: {self.pin.value})")
 
 
-def test_diagnose_recommends_workaround_and_hides_pin(monkeypatch):
+def test_diagnose_recommends_comdirect_conform_after_9931(monkeypatch):
+    """A scheitert mit 9931 (Kunden-ID unbekannt), B (customer_id='') gelingt."""
     monkeypatch.setattr(fints_session, "FinTS3PinTanClient", DiagnoseFake)
     monkeypatch.delenv("FINTS_CUSTOMER_ID_WORKAROUND", raising=False)
     out = fints_diagnose.diagnose(
-        "comdirect", "20041133", "12345678900", PIN,
-        "https://fints.comdirect.de/fints", yes=True,
+        "comdirect", "20041133", USER, PIN, "https://x", yes=True,
     )
-    assert "A) Default" in out and "B) Workaround" in out
+    assert "A) Default" in out
+    assert "B) comdirect-konform" in out
     assert "9942" in out                              # Bankcode in der Zusammenfassung
-    assert "FINTS_CUSTOMER_ID_WORKAROUND=1" in out    # empfiehlt den Workaround
+    assert 'client.customer_id = ""' in out           # comdirect-Empfehlung
     assert PIN not in out                             # PIN steht nicht in der Ausgabe
     assert "123***00" in out                          # Benutzerkennung maskiert
 
@@ -121,9 +125,135 @@ def test_diagnose_default_ok_needs_no_workaround(monkeypatch):
     monkeypatch.setattr(fints_session, "FinTS3PinTanClient", AlwaysOk)
     monkeypatch.delenv("FINTS_CUSTOMER_ID_WORKAROUND", raising=False)
     out = fints_diagnose.diagnose(
-        "comdirect", "20041133", "12345678900", PIN, "https://x", yes=True,
+        "comdirect", "20041133", USER, PIN, "https://x", yes=True,
     )
     assert "OK" in out
     assert "kein Workaround nötig" in out
     assert "übersprungen" in out          # kein zweiter Login-Versuch (Sperrschutz)
+    assert PIN not in out
+
+
+def test_build_client_failure_is_reported_not_crash(monkeypatch):
+    """Ein Fehler beim Client-Bau (build_client) bricht die Diagnose NICHT mehr ab."""
+    class BuildFailFake:
+        def __init__(self, *a, **k):
+            raise FinTSClientPINError(f"connection refused for user {USER}")
+
+        def fetch_tan_mechanisms(self):
+            return {}
+
+    monkeypatch.setattr(fints_session, "FinTS3PinTanClient", BuildFailFake)
+    monkeypatch.delenv("FINTS_CUSTOMER_ID_WORKAROUND", raising=False)
+    out = fints_diagnose.diagnose(
+        "comdirect", "20041133", USER, PIN, "https://x", yes=True,
+    )
+    assert "FEHLER" in out
+    assert "Verbindungsaufbau fehlgeschlagen" in out
+    assert "Traceback" not in out
+    assert PIN not in out
+    assert USER not in out
+
+
+def test_variant_b_sets_empty_customer_id_and_runs_single_attempt(monkeypatch):
+    """Variante B setzt customer_id='' und macht genau EINEN fetch-Versuch."""
+    instances = []
+
+    class CountingFake:
+        def __init__(self, *a, **k):
+            self.user_id = USER
+            self.customer_id = "NOTSET"
+            self.fetch_calls = 0
+            self.customer_at_fetch = None
+            self.pin = Pin(PIN)
+            instances.append(self)
+
+        def fetch_tan_mechanisms(self):
+            self.fetch_calls += 1
+            self.customer_at_fetch = self.customer_id
+            if self.customer_id == "":
+                return {}
+            raise FinTSClientPINError(f"PIN {self.pin.value} wrong")
+
+    monkeypatch.setattr(fints_session, "FinTS3PinTanClient", CountingFake)
+    monkeypatch.delenv("FINTS_CUSTOMER_ID_WORKAROUND", raising=False)
+    out = fints_diagnose.diagnose(
+        "comdirect", "20041133", USER, PIN, "https://x", yes=True, variant="b",
+    )
+    fake = instances[0]
+    assert fake.customer_id == ""              # leer, NICHT None/from user_id
+    assert fake.customer_at_fetch == ""        # war beim Fetch bereits leer
+    assert fake.fetch_calls == 1               # genau EIN Login-Versuch
+    assert "B) comdirect-konform" in out
+    assert "OK" in out
+    assert PIN not in out
+
+
+def test_missing_hisyn4_recommends_raw_log(monkeypatch):
+    """Kein HISYN4 (Could not find system_id) -> Empfehlung verweist auf --log."""
+    class NoHisynFake:
+        def __init__(self, *a, **k):
+            self.user_id = USER
+            self.customer_id = None
+            self.pin = Pin(PIN)
+
+        def fetch_tan_mechanisms(self):
+            raise ValueError(f"Could not find system_id | no HISYN4 (user {USER})")
+
+    monkeypatch.setattr(fints_session, "FinTS3PinTanClient", NoHisynFake)
+    monkeypatch.delenv("FINTS_CUSTOMER_ID_WORKAROUND", raising=False)
+    out = fints_diagnose.diagnose(
+        "comdirect", "20041133", USER, PIN, "https://x", yes=True,
+    )
+    assert "--log" in out
+    assert "HISYN4" in out
+    assert PIN not in out
+    assert USER not in out
+
+
+def test_log_flag_keeps_pin_and_username_masked(monkeypatch):
+    """Auch mit --log dürfen PIN und Benutzerkennung nicht im Output stehen."""
+    class LogFake:
+        def __init__(self, *a, **k):
+            self.user_id = USER
+            self.customer_id = None
+            self.pin = Pin(PIN)
+
+        def fetch_tan_mechanisms(self):
+            # Die Bank "echot" die Zugangsdaten in die Rohantwort.
+            logging.getLogger("fints").debug(
+                f"Dialog response: Benutzer {self.user_id} PIN {self.pin.value} "
+                "HISYN4 Segment 9931"
+            )
+            raise FinTSClientPINError(f"PIN {self.pin.value} wrong")
+
+    monkeypatch.setattr(fints_session, "FinTS3PinTanClient", LogFake)
+    monkeypatch.delenv("FINTS_CUSTOMER_ID_WORKAROUND", raising=False)
+    out = fints_diagnose.diagnose(
+        "comdirect", "20041133", USER, PIN, "https://x", yes=True, log=True,
+    )
+    assert "Dialog response" in out        # Log wird angezeigt (--log)
+    assert "9931" in out                   # Code sichtbar
+    assert PIN not in out                  # PIN maskiert, trotz --log
+    assert USER not in out                 # Benutzerkennung maskiert, trotz --log
+
+
+def test_variant_alle_runs_only_until_success(monkeypatch):
+    """--variante alle stoppt, sobald eine Variante erfolgreich ist."""
+    calls = []
+
+    class OkFirst(DiagnoseFake):
+        def fetch_tan_mechanisms(self):
+            calls.append(getattr(self, "customer_id", None))
+            if self.customer_id == "":
+                return {}
+            raise FinTSClientPINError(f"PIN {self.pin.value} wrong")
+
+    monkeypatch.setattr(fints_session, "FinTS3PinTanClient", OkFirst)
+    monkeypatch.delenv("FINTS_CUSTOMER_ID_WORKAROUND", raising=False)
+    out = fints_diagnose.diagnose(
+        "comdirect", "20041133", USER, PIN, "https://x", yes=True, variant="alle",
+    )
+    # A scheitert, B (customer_id='') gelingt -> C wird nie ausgeführt.
+    assert calls == [None, ""]
+    assert "C) finance-tracker-Workaround" not in out
     assert PIN not in out

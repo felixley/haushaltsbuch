@@ -1,15 +1,31 @@
 #!/usr/bin/env python3
 """FinTS-Diagnose für Login-Fehler (z. B. comdirect ``FinTSClientPINError``).
 
-Führt zwei Verbindungsvarianten nacheinander aus und zeigt die von der Bank
+Führt mehrere Verbindungsvarianten nacheinander aus und zeigt die von der Bank
 zurückgemeldeten FinTS-Codes (9931, 9942, 9340, 9100, 9010, …) mit deutscher
 Bedeutung, damit die Ursache (Kunden-ID-Handling, Benutzerkennung, PIN, URL)
 eingegrenzt werden kann.
 
+Varianten (``--variante a|b|c|alle``, Default ``a``):
+    A) Default  – customer_id = Zugangsnummer (exakt der Pfad von
+                  transaktionen_speichern.py).
+    B) comdirect-konform – Kunden-ID wird vor dem ersten Dialog auf "" gesetzt
+                  (client.customer_id = ""), wie es das comdirect-FAQ
+                  (https://www.comdirect.de/cms/sicherheit-software-banking-fints.html)
+                  empfiehlt ("Das Feld Kunden-ID bitte freilassen"). Genau EIN
+                  Login-Versuch, kein vorheriger System-ID-Sync.
+    C) finance-tracker-Workaround – der alte Pfad (create_client mit
+                  FINTS_CUSTOMER_ID_WORKAROUND=1). Nur auf ausdrückliche
+                  Auswahl; wird nie automatisch gestartet.
+
 Aufruf:
     python fints_diagnose.py                 # comdirect (aus BANK/.env)
     python fints_diagnose.py --bank dkb
-    python fints_diagnose.py --yes           # keine Rückfrage vor Variante B
+    python fints_diagnose.py --yes           # keine Rückfragen (Kontosperre!)
+    python fints_diagnose.py --variante alle # alle drei Varianten testen
+    python fints_diagnose.py --log           # gefilterte Roh-Response (DEBUG)
+    python fints_diagnose.py --log-voll      # ungefilterte Roh-Response
+    python fints_diagnose.py --log-datei log.txt   # Roh-Log in Datei schreiben
 
 Datenschutz:
     - Die PIN wird per getpass (ohne Echo) abgefragt, nie gespeichert/loggt.
@@ -32,6 +48,7 @@ import sys
 # aus .env, sondern immer per getpass.
 from dotenv import load_dotenv
 
+import fints_session
 from fints_session import create_client
 
 load_dotenv()
@@ -59,6 +76,18 @@ FINTS_CODE_DE: dict[str, str] = {
 # Codes, die auf Zugangsdaten-/PIN-Probleme hindeuten -> danach NICHT ohne
 # Rückfrage weitermachen (Kontosperre-Gefahr).
 LOCK_CODES = ("9931", "9942", "9340", "9100")
+
+# Zeilen des DEBUG-Logs, die für die Diagnose relevant sind (wird mit --log
+# herausgefiltert): Segment-/Response-Texte, HISYN/HKSYN, Kunden-ID, Codes.
+LOG_HINT_PARTS = (
+    "Dialog response",
+    "Response",
+    "HISYN",
+    "HKSYN",
+    "Kunden",
+    "Sending SYNC",
+    "Initialisierung",
+)
 
 
 def mask_user(user: str | None) -> str:
@@ -120,22 +149,45 @@ def extract_codes(text: str) -> list[str]:
     return seen
 
 
+def filter_log_lines(log_text: str) -> list[str]:
+    """Filtern des DEBUG-Logs auf diagnostisch relevante Zeilen (--log)."""
+    out: list[str] = []
+    for line in log_text.splitlines():
+        if any(p in line for p in LOG_HINT_PARTS) or re.search(r"\b\d{4}\b", line):
+            out.append(line)
+    return out
+
+
 def _run_variant(name: str, build_client, blz, username, pin, url) -> dict:
     """Führt EINE Variante mit frischem Client aus und liefert das Ergebnis.
 
+    Fängt Fehler aus ``build_client`` UND aus ``fetch_tan_mechanisms`` ab,
+    sodass die Diagnose nie mit einem Traceback abbricht. ``stage`` verrät,
+    ob der Verbindungsaufbau (Client-Bau) oder erst der Dialog scheiterte.
     Kein echter Netzwerkzugriff, wenn ``fints_session.FinTS3PinTanClient``
     für Tests durch einen Fake ersetzt wurde.
     """
     logger, handler, stream = _fints_log_handler(pin, username)
     error = None
     exc_type = None
+    stage = None
     try:
-        client = build_client(blz, username, pin, url)
         try:
-            client.fetch_tan_mechanisms()  # löst den Dialog-Aufbau / System-ID-Sync aus
+            client = build_client(blz, username, pin, url)
+            stage = "verbindung"  # Client-Bau ok (Verbindungsaufbau gelungen)
         except Exception as e:  # noqa: BLE001 – FinTSError und alle anderen
             exc_type = type(e).__name__
             error = scrub(str(e), pin, username)
+            stage = "verbindung"
+            client = None
+        if client is not None:
+            try:
+                client.fetch_tan_mechanisms()  # Dialog-Aufbau / System-ID-Sync
+                stage = None  # Verbindung + Dialog ok
+            except Exception as e:  # noqa: BLE001 – FinTSError und alle anderen
+                exc_type = type(e).__name__
+                error = scrub(str(e), pin, username)
+                stage = "dialog"
     finally:
         log_text = scrub(stream.getvalue(), pin, username)
         logger.removeHandler(handler)
@@ -147,7 +199,19 @@ def _run_variant(name: str, build_client, blz, username, pin, url) -> dict:
         "exception_type": exc_type,
         "error": error,
         "codes": codes,
+        "stage": stage,
+        "log": log_text,
     }
+
+
+def _result_codes(result: dict) -> list[str]:
+    """Codes aus Log UND Fehlertext einer Variante (vereinigt, in Reihenfolge)."""
+    seen: list[str] = []
+    for text in (result.get("codes") or [], result.get("error") or ""):
+        for c in extract_codes(text) if isinstance(text, str) else text:
+            if c not in seen:
+                seen.append(c)
+    return seen
 
 
 def _build_default(blz, username, pin, url):
@@ -155,29 +219,83 @@ def _build_default(blz, username, pin, url):
     return create_client(blz, username, pin, url)
 
 
+def _build_comdirect_conform(blz, username, pin, url):
+    """comdirect-konform: Kunden-ID vor dem ersten Dialog leer setzen.
+
+    Direkt über fints_session.FinTS3PinTanClient (Modulreferenz, damit Tests
+    den Constructor patchen können), KEIN vorheriger sync_system_id-Aufruf und
+    danach genau EIN Login-Versuch in fetch_tan_mechanisms(). Python-fints
+    setzt intern ``customer_id = customer_id or user_id`` (leerer String ist
+    falsy), daher muss die leere Kunden-ID NACH dem Konstruktor per Zuweisung
+    gesetzt werden.
+    """
+    os.environ.pop("FINTS_CUSTOMER_ID_WORKAROUND", None)
+    client = fints_session.FinTS3PinTanClient(
+        blz, username, pin, url, product_id=fints_session.PRODUCT_ID
+    )
+    client.customer_id = ""  # comdirect-FAQ: "Das Feld Kunden-ID bitte freilassen"
+    return client
+
+
 def _build_workaround(blz, username, pin, url):
     os.environ["FINTS_CUSTOMER_ID_WORKAROUND"] = "1"
     return create_client(blz, username, pin, url)
 
 
-def recommend(a: dict, b: dict) -> str:
-    """Empfehlung aus den beiden Varianten-Ergebnissen (deutsch)."""
-    if a["error"] is None:
+def _ask(prompt: str) -> bool:
+    try:
+        return input(prompt).strip().lower() == "j"
+    except (EOFError, KeyboardInterrupt):
+        return False
+
+
+def recommend(results: dict) -> str:
+    """Empfehlung aus den Varianten-Ergebnissen (deutsch)."""
+    a = results.get("a")
+    b = results.get("b")
+    c = results.get("c")
+
+    if a is not None and a["error"] is None:
         return "Standard-Pfad (Variante A) funktioniert – kein Workaround nötig."
-    if b["error"] is None:
+
+    if b is not None and b["error"] is None:
+        if a is not None and any(cd in ("9931", "9942") for cd in _result_codes(a)):
+            return (
+                "comdirect-konform: Kunden-ID leer setzen "
+                '(client.customer_id = "" vor dem ersten Dialog), d.h. '
+                "fints_session.create_client muss das für comdirect tun."
+            )
         return (
-            "Variante B funktioniert -> FINTS_CUSTOMER_ID_WORKAROUND=1 setzen "
+            'comdirect-konform (Variante B) funktioniert -> client.customer_id = "" '
+            "setzen (Kunden-ID leer lassen), wie im comdirect-FAQ beschrieben."
+        )
+
+    if c is not None and c["error"] is None:
+        return (
+            "Variante C funktioniert -> FINTS_CUSTOMER_ID_WORKAROUND=1 setzen "
             "(comdirect lehnt die anonymous Kunden-ID im Dialog-Init ab)."
         )
-    codes = a["codes"] + b["codes"]
-    if any(c in ("9931", "9910", "9930") for c in codes):
+
+    # Keine Variante erfolgreich: fehlendes HISYN4 ist der entscheidende Befund.
+    for r in (a, b, c):
+        if r is not None and r["error"] and "Could not find system_id" in r["error"]:
+            return (
+                "Dialog mit leerer Kunden-ID akzeptiert, aber HKSYN liefert kein HISYN4 "
+                "-> Rohlog mit --log schicken."
+            )
+
+    codes: list[str] = []
+    for key in ("a", "b", "c"):
+        if results.get(key):
+            codes += _result_codes(results[key])
+    if any(cd in ("9931", "9910", "9930") for cd in codes):
         return (
             "Bank meldet unbekannte/fehlerhafte Benutzerkennung oder Kunden-ID "
             "(9931/9910/9930): Benutzerkennung prüfen (Kontonummer + Unterkonto, nur "
             "Zahlen) und FinTS-URL ohne '/' am Ende prüfen. Achtung: weitere Fehlversuche "
             "können das Konto sperren."
         )
-    if any(c in ("9942", "9340", "9100") for c in codes):
+    if any(cd in ("9942", "9340", "9100") for cd in codes):
         return (
             "Bank meldet PIN-Fehler (9942/9340/9100): PIN prüfen. "
             "Achtung: weitere Fehlversuche können das Konto sperren."
@@ -185,55 +303,89 @@ def recommend(a: dict, b: dict) -> str:
     return "Keine eindeutige Diagnose möglich – Codes siehe oben."
 
 
-def diagnose(bank, blz, username, pin, url, yes: bool = False) -> str:
-    """Führt beide Varianten aus und liefert die deutsche Zusammenfassung.
+def _stage_desc(result: dict) -> str:
+    if result["stage"] == "verbindung":
+        return "Verbindungsaufbau fehlgeschlagen"
+    if result["stage"] == "dialog":
+        return "Verbindung OK, Dialog fehlgeschlagen"
+    return ""
 
-    ``yes=True`` überspringt die interaktive Rückfrage vor Variante B.
-    Für die Tests wird ``fints_session.FinTS3PinTanClient`` durch einen Fake
-    ersetzt, sodass kein echtes Netzwerk anläuft.
+
+def diagnose(bank, blz, username, pin, url, yes: bool = False, variant: str = "a",
+             log: bool = False, log_voll: bool = False, log_datei: str | None = None) -> str:
+    """Führt die gewählten Varianten aus und liefert die deutsche Zusammenfassung.
+
+    ``yes=True`` überspringt alle Rückfragen. ``variant`` wählt die
+    Start-Variante/Reihenfolge ('a', 'b', 'c' oder 'alle'); bei 'a' wird nach
+    einem Fehlschlag wie gehabt nach Variante B gefragt. Für die Tests wird
+    ``fints_session.FinTS3PinTanClient`` durch einen Fake ersetzt, sodass kein
+    echtes Netzwerk anläuft.
     """
+    variants = {
+        "a": ("A) Default (customer_id = Zugangsnummer)", _build_default),
+        "b": ("B) comdirect-konform (Kunden-ID leer)", _build_comdirect_conform),
+        "c": ("C) finance-tracker-Workaround", _build_workaround),
+    }
+    if variant == "alle":
+        head, chain = "a", ["b", "c"]
+    elif variant == "a":
+        head, chain = "a", ["b"]
+    else:
+        head, chain = variant, []
+
     lines: list[str] = []
     add = lines.append
     add(f"Bank: {bank}, Benutzerkennung: {mask_user(username)}")
     add("Achtung: Fehlversuche beim Login können das Konto vorübergehend SPERREN!")
     add("Ohne Not nicht mehrfach auf 'Wiederholen' klicken.\n")
 
-    a = _run_variant("A) Default (customer_id = user_id)", _build_default,
-                     blz, username, pin, url)
+    results: dict = {}
+    order: list[str] = []
 
-    proceed = True
-    if a["error"] is None:
-        # Variante A hat funktioniert -> KEINEN weiteren Login-Versuch riskieren
-        # (comdirect sperrt nach mehreren Fehlversuchen).
-        proceed = False
-        add("Variante B übersprungen (Variante A war erfolgreich – kein weiterer "
-            "Login-Versuch nötig).\n")
-    elif any(c in LOCK_CODES for c in a["codes"]) and not yes:
-        try:
-            answer = input("\nTrotzdem Variante B versuchen? j/n: ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            answer = ""
-        proceed = answer == "j"
-        if not proceed:
-            add("Abgebrochen – Variante B wird nicht ausgeführt (Kontosperre-Risiko).\n")
+    name, builder = variants[head]
+    results[head] = _run_variant(name, builder, blz, username, pin, url)
+    order.append(head)
 
-    b = None
-    if proceed:
-        b = _run_variant("B) Workaround (customer_id leer)", _build_workaround,
-                         blz, username, pin, url)
+    if results[head]["error"] is None:
+        # Variante hat funktioniert -> KEINEN weiteren Login-Versuch riskieren.
+        add("Weitere Varianten übersprungen (diese Variante war erfolgreich – kein "
+            "weiterer Login-Versuch nötig).\n")
+    else:
+        for key in chain:
+            prompt = (
+                "\nTrotzdem Variante B versuchen? j/n: " if key == "b"
+                else "\nTrotzdem Variante C (finance-tracker-Workaround) versuchen? j/n: "
+            )
+            if not (yes or _ask(prompt)):
+                add(f"Abgebrochen – Variante {key.upper()} wird nicht ausgeführt "
+                    "(Kontosperre-Risiko).\n")
+                break
+            name, builder = variants[key]
+            results[key] = _run_variant(name, builder, blz, username, pin, url)
+            order.append(key)
+            if results[key]["error"] is None:
+                add(f"Variante {key.upper()} war erfolgreich – keine weiteren "
+                    "Login-Versuche.\n")
+                break
 
     add("=== Zusammenfassung ===")
-    for result in (a, b):
-        if result is None:
-            continue
-        status = "OK" if result["error"] is None else f"FEHLER ({result['exception_type']})"
-        codes = ", ".join(result["codes"]) or "–"
-        add(f"{result['variante']}: {status} | Codes: {codes}")
-        if result["error"]:
-            add(f"    Meldung: {result['error']}")
+    for key in order:
+        r = results[key]
+        if r["error"] is None:
+            status = "OK"
+        else:
+            status = f"FEHLER ({r['exception_type']}) – {_stage_desc(r)}"
+        codes = ", ".join(r["codes"]) or "–"
+        add(f"{r['variante']}: {status} | Codes: {codes}")
+        if r["error"]:
+            add(f"    Meldung: {r['error']}")
 
     add("\n=== Code-Bedeutungen (Fundstellen) ===")
-    seen_codes = (a["codes"] + (b["codes"] if b else []))
+    seen_codes: list[str] = []
+    for key in order:
+        for c in results[key]["codes"]:
+            if c not in seen_codes:
+                seen_codes.append(c)
     if seen_codes:
         for code in seen_codes:
             if code in FINTS_CODE_DE:
@@ -241,13 +393,32 @@ def diagnose(bank, blz, username, pin, url, yes: bool = False) -> str:
     else:
         add("  (keine bekannten FinTS-Codes im Log gefunden)")
 
-    if b is None:
-        b = {"variante": "B) Workaround (customer_id leer)", "exception_type": None,
-             "error": "nicht ausgeführt (Kontosperre-Risiko)", "codes": []}
+    # Roh-Response der Bank (maskierter DEBUG-Log)
+    if log:
+        add("\n=== Roh-Response der Bank (DEBUG-Log, maskiert) ===")
+        for key in order:
+            r = results[key]
+            add(f"--- {r['variante']} ---")
+            logtext = r["log"]
+            the_lines = (logtext or "").splitlines() if log_voll else filter_log_lines(logtext or "")
+            add("\n".join(the_lines) if the_lines else "(keine relevanten Zeilen)")
+        add("")
+
+    if log_datei:
+        try:
+            with open(log_datei, "w", encoding="utf-8") as fh:
+                for key in order:
+                    r = results[key]
+                    fh.write(f"=== {r['variante']} ===\n")
+                    fh.write(r["log"] or "")
+                    fh.write("\n\n")
+            add(f"(Roh-Log geschrieben nach {log_datei})")
+        except OSError as e:
+            add(f"(Fehler beim Schreiben des Logs: {e})")
 
     add("\n=== Empfehlung ===")
-    add("  " + recommend(a, b))
-    return "\n".join(lines)
+    add("  " + recommend(results))
+    return scrub("\n".join(lines), pin, username)
 
 
 def parse_args(argv=None):
@@ -258,7 +429,25 @@ def parse_args(argv=None):
     )
     parser.add_argument(
         "--yes", action="store_true",
-        help="Keine Rückfrage vor Variante B (trotz Kontosperre-Risiko weitermachen).",
+        help="Keine Rückfragen (trotz Kontosperre-Risiko weitermachen).",
+    )
+    parser.add_argument(
+        "--variante", choices=["a", "b", "c", "alle"], default="a",
+        help="Zu testende Variante(n): a) Default, b) comdirect-konform (Kunden-ID "
+             "leer), c) finance-tracker-Workaround, alle. Default: a.",
+    )
+    parser.add_argument(
+        "--log", action="store_true",
+        help="Maskierten DEBUG-Log (Roh-Response der Bank) pro Variante zeigen, "
+             "gefiltert auf relevante Zeilen.",
+    )
+    parser.add_argument(
+        "--log-voll", action="store_true",
+        help="Mit --log: ungefilterten DEBUG-Log zeigen.",
+    )
+    parser.add_argument(
+        "--log-datei", metavar="PFAD", default=None,
+        help="Vollständigen maskierten DEBUG-Log in diese Datei schreiben.",
     )
     return parser.parse_args(argv)
 
@@ -282,7 +471,8 @@ def main() -> None:
     username = credentials["username"]
     url = credentials["hbci"]
     pin = getpass.getpass(f"PIN für {bank} ({mask_user(username)}): ")
-    print(diagnose(bank, blz, username, pin, url, yes=args.yes))
+    print(diagnose(bank, blz, username, pin, url, yes=args.yes, variant=args.variante,
+                   log=args.log, log_voll=args.log_voll, log_datei=args.log_datei))
 
 
 if __name__ == "__main__":
