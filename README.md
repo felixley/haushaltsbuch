@@ -56,6 +56,8 @@ uv sync
 cp .env.example .env
 # -> .env öffnen und Werte eintragen (Bank, BLZ, Username, HBCI, TAN-Verfahren)
 #    Die PIN wird NICHT in .env gespeichert, sondern beim Start abgefragt.
+#    Tipp zur BLZ: die richtige BLZ steht in deiner IBAN (Stellen 5-12),
+#    z.B. DE33 2004 1155 ... -> BLZ 20041155. Falsche BLZ -> "PIN wrong?".
 ```
 
 Wichtige `.env`-Variablen:
@@ -172,6 +174,15 @@ python-fints generisch als „PIN wrong?“ übersetzt.
 
 Prüf-Reihenfolge:
 
+0. **BLZ (Bankleitzahl).** Stimmt `<BANK>_BLZ` in der `.env` mit deiner Bank
+   überein? **Die IBAN verrät die richtige BLZ:** die Stellen 5-12 der IBAN
+   (also `DE` + 2 Prüfziffern + BLZ) sind exakt die BLZ. Beispiel:
+   `DE33 2004 1155 ...` -> BLZ `20041155`. Bei comdirect ist die korrekte BLZ
+   **20041155** (nicht `20041133`!) – eine falsche BLZ führt zu genau dem
+   Loginfehler „PIN wrong?“ (Bank-Code 9931/9942/9340/9100), obwohl PIN und
+   photoTAN korrekt sind. Das ist die häufigste Ursache, wenn der Abruf lokal
+   funktioniert, auf einem anderen Rechner/VPS aber nicht (weil dort eine
+   andere/veraltete BLZ in der `.env` steht).
 1. **Kunden-ID-Handling.** comdirect lehnt die Anonymous-Kunden-ID
    (`9999999999`) im Dialog ab. Lösung: `FINTS_CUSTOMER_ID_WORKAROUND=1` in
    `.env` setzen – `fints_session.sync_system_id` synchronisiert die
