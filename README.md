@@ -127,6 +127,22 @@ Enthalten: Kennzahlen, Einnahmen/Ausgaben (monatlich/jährlich), Kategorie-Auswe
 Umsatztabelle mit Filtern (Suche, Kategorie, Konto, Zeitraum, Paging),
 Kategorien verwalten, Kategorie je Umsatz setzen.
 
+**Partner-Spalte ohne IBAN:** Manche Banken hängen im Feld `applicant_name`
+die IBAN des Gegenkontos direkt an den Namen (z. B.
+`DE03760300800870717444FELIX LEY`). Beim Anzeigen der Umsatztabelle wird in
+der Spalte *Partner* eine IBAN-artige Zeichenkette per regulärem Ausdruck
+entfernt: **zwei Buchstaben gefolgt von mindestens acht Ziffern** (kompakt
+oder in Vierergruppen wie `DE89 3704 0044 ...`). Es bleibt nur der darauf
+folgende Text übrig (`web/partner.py`). Namen ohne IBAN bleiben unverändert.
+
+**Bestehende Einträge bereinigen:** Damit die IBAN auch aus bereits
+gespeicherten Umsätzen verschwindet, einmalig:
+
+```bash
+python migration/clean_partner_names.py            # nutzt DB_PATH/.env (sonst finance.db)
+python migration/clean_partner_names.py --dry-run  # nur anzeigen, nichts schreiben
+```
+
 Noch nicht im Dashboard (aus finance-tracker bewusst zurückgestellt):
 Personen, Kategorie-Regeln (automatisches Lernen), Konto-Salden, FinTS-Verbindungs-UI, Sync-Button.
 
