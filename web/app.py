@@ -25,6 +25,7 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from web import sync
+from web.partner import clean_partner_name
 
 ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
@@ -191,7 +192,7 @@ def create_app() -> FastAPI:
                 "valutadatum": r["entry_date"],
                 "betrag": _money(r["amount"]),
                 "waehrung": r["currency"] or "EUR",
-                "partner_name": r["applicant_name"],
+                "partner_name": clean_partner_name(r["applicant_name"]),
                 "verwendungszweck": r["purpose"],
                 "category_id": r["category_id"],
                 "category": r["category"],
