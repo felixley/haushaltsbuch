@@ -36,6 +36,9 @@ load_dotenv()
 
 from fints_session import create_client  # gemeinsamer Verbindungsaufbau (wie finance-tracker)
 
+# Automatische Kategorisierung + Vorschlagskategorien (web/kategorien.py).
+from web.kategorien import ensure_default_categories
+
 SCHEMA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "schema.sql")
 
 # Tabellenspalten, die aus dem data-Dict gefüllt werden.
@@ -60,10 +63,16 @@ COLUMNS = [
 # Datenbank
 # ------------------------------------------------------------------
 def apply_schema(connection: sqlite3.Connection) -> None:
-    """Wendet schema.sql an (idempotent, kann beliebig oft laufen)."""
+    """Wendet schema.sql an (idempotent, kann beliebig oft laufen).
+
+    Legt zusätzlich die Vorschlagskategorien zur automatischen Kategorisierung
+    an (siehe ``web/kategorien.py``), ohne vorhandene Kategorien zu verändern.
+    """
     with open(SCHEMA_FILE, "r", encoding="utf-8") as handle:
         connection.executescript(handle.read())
     _migrate(connection)
+    # Vorschlagskategorien (idempotent) – nur anlegen, nichts überschreiben.
+    ensure_default_categories(connection)
     connection.commit()
 
 

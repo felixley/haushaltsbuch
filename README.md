@@ -8,11 +8,13 @@ SQLite-Datenbank und einem pandas-Viewer zum Ansehen der Daten.
 | Datei | Zweck |
 |---|---|
 | `testverbindung.py` | Ursprüngliches Testskript: Bankverbindung + Umsatzabruf (Ausgabe im Terminal). |
-| `schema.sql` | SQLite-Schema (`accounts`, `transactions`). |
+| `schema.sql` | SQLite-Schema (`accounts`, `transactions`, `categories`). |
 | `transaktionen_speichern.py` | Ruft Umsätze ab und schreibt `results[].data` in die SQLite-DB. |
 | `db_anzeigen.py` | Zeigt den Inhalt der Datenbank mit pandas an. |
 | `fints_diagnose.py` | Diagnose bei Loginfehlern (`FinTSClientPINError "PIN wrong?"`): zeigt die Bankcodes beider Kunden-ID-Varianten. |
 | `manuelle_ueberprüfung.py` | Minimales Setup: DB mit pandas einlesen (Spielwiese). |
+| `web/kategorien.py` | Regelbasierte automatische Kategorisierung von Umsätzen (deutsche Kategorien) + CLI. |
+| `web/app.py` / `web/sync.py` / `web/static/` | FastAPI-Dashboard, GUI-Bankabruf und Frontend. |
 
 ## Datenmodell (SQLite)
 
@@ -143,8 +145,43 @@ python migration/clean_partner_names.py            # nutzt DB_PATH/.env (sonst f
 python migration/clean_partner_names.py --dry-run  # nur anzeigen, nichts schreiben
 ```
 
+## Automatische Kategorisierung
+
+Umsätze werden anhand von Empfänger (`applicant_name`) und Verwendungszweck
+(`purpose`) **regelbasiert** einer Kategorie zugeordnet (`web/kategorien.py`).
+Der Verwendungszweck wird von den Banken oft ohne Trennzeichen aneinandergehängt
+(z. B. `...UBERWEISUNGMIETE`); die Muster suchen deshalb per Teilstring, nicht
+über Wortgrenzen.
+
+- **Vorschlagskategorien:** Beim Start des Dashboards bzw. bei
+  `transaktionen_speichern.py` werden gängige deutsche Kategorien angelegt
+  (idempotent, vorhandene bleiben unverändert): u. a. Lebensmittel,
+  Restaurants & Cafés, Tanken, Mobilität & ÖPNV, Miete & Wohnen,
+  Nebenkosten & Strom, Internet & Telefon, Abos & Streaming, Versicherungen,
+  Gesundheit & Apotheke, Kleidung & Schuhe, Haushalt & Drogerie,
+  Elektronik & Technik, Freizeit & Hobby, Reisen & Urlaub, Bildung & Kinder,
+  Spenden & Geschenke, Bankgebühren, Steuern & Gebühren, Geldanlagen & Sparen,
+  Barbeträge sowie Gehalt & Lohn, Kindergeld, Elterngeld, Steuererstattung,
+  Erstattungen & Rückzahlungen, Zinsen & Kapitalerträge, Transfers (intern),
+  Sonstige Einnahmen.
+- **Sicher statt falsch:** Greift kein Muster, bleibt der Umsatz
+  `Nicht zugeordnet` (`NULL`). Manuell gesetzte Kategorien werden nie
+  überschrieben (außer mit `--overwrite`).
+- **Im Dashboard:** In der Karte *Kategorien* ordnet der Button
+  **Automatisch kategorisieren** alle noch leeren Zuordnungen zu
+  (`POST /api/categorize`). Beim Bankabruf (`web/sync.py`) werden neue Umsätze
+  automatisch kategorisiert.
+
+Vorhandene Umsätze einmalig zuordnen:
+
+```bash
+python -m web.kategorien --db finance.db            # nur leere Zuordnungen füllen
+python -m web.kategorien --db finance.db --dry-run  # nur anzeigen
+python -m web.kategorien --db finance.db --overwrite  # auch bestehende neu bewerten
+```
+
 Noch nicht im Dashboard (aus finance-tracker bewusst zurückgestellt):
-Personen, Kategorie-Regeln (automatisches Lernen), Konto-Salden, FinTS-Verbindungs-UI, Sync-Button.
+Personen, Konto-Salden, FinTS-Verbindungs-UI (der Sync-Button existiert bereits).
 
 ### Testdaten aus finance-tracker übernehmen
 

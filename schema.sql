@@ -35,6 +35,9 @@ CREATE TABLE IF NOT EXISTS accounts (
 -- ------------------------------------------------------------
 -- Kategorien (fuer Dashboard-Auswertung)
 -- ------------------------------------------------------------
+-- Vorschlagskategorien werden beim Start automatisch angelegt
+-- (web/kategorien.py, ensure_default_categories) und Umsaetze
+-- regelbasiert zugeordnet.
 CREATE TABLE IF NOT EXISTS categories (
     id    INTEGER PRIMARY KEY AUTOINCREMENT,
     name  TEXT NOT NULL UNIQUE,

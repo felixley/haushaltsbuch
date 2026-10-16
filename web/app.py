@@ -25,6 +25,7 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from web import sync
+from web.kategorien import apply_categorization_to_db, ensure_default_categories
 from web.partner import clean_partner_name
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -56,6 +57,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
         if column not in cols:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+    # Vorschlagskategorien anlegen (idempotent) – damit das Dashboard direkt
+    # Auswahlmöglichkeiten hat, auch ohne manuelles Kategorisieren.
+    ensure_default_categories(conn)
     conn.commit()
 
 
@@ -220,6 +224,22 @@ def create_app() -> FastAPI:
             conn.execute("UPDATE transactions SET category_id = ? WHERE id = ?", (cat_id, tx_id))
             conn.commit()
         return {"ok": True, "category": name}
+
+    # --- Automatische Kategorisierung -------------------------------
+    @app.post("/api/categorize")
+    def categorize_transactions(body: dict | None = None):
+        """Kategorisiert Umsätze automatisch anhand von Empfänger und Verwendungszweck.
+
+        Standard: nur noch nicht zugeordnete Umsätze (manuelle Zuordnungen
+        bleiben erhalten). Mit ``{"overwrite": true}`` werden alle neu bewertet.
+        """
+        overwrite = bool((body or {}).get("overwrite"))
+        with connect() as conn:
+            ensure_schema(conn)
+        scanned, changed = apply_categorization_to_db(
+            DB_PATH, only_uncategorized=not overwrite
+        )
+        return {"ok": True, "scanned": scanned, "changed": changed}
 
     # --- Kategorien -------------------------------------------------
     @app.get("/api/categories")

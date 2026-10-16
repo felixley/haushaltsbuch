@@ -192,7 +192,11 @@ def test_tan_flow_end_to_end(client, env_and_db):
     client.post(f"/api/sync/{job_id}/input", json={"tan": "654321"})
     j = wait_for(client, job_id, {"done", "error"})
     assert j["status"] == "done", j
-    assert j["result"]["accounts"][FakeAccount.iban] == {"new": 2, "skipped": 0, "fetched": 2}
+    # Neu ist zusätzlich "categorized": Anzahl der automatisch zugeordneten Umsätze
+    # (hier 1: die unbekannte Einnahme "Arbeitgeber"/"Testumsatz 2" -> Sonstige Einnahmen).
+    assert j["result"]["accounts"][FakeAccount.iban] == {
+        "new": 2, "skipped": 0, "fetched": 2, "categorized": 1,
+    }
     assert FakeClient.sent_tans == ["123456", "654321"]
 
     # Umsätze stehen in der DB

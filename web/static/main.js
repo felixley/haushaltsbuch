@@ -182,6 +182,20 @@ $("add-cat").addEventListener("click", async () => {
   } catch (e) { showError(e.message); }
 });
 
+$("auto-cat").addEventListener("click", async () => {
+  const btn = $("auto-cat");
+  btn.disabled = true;
+  try {
+    const r = await api("/api/categorize", {method: "POST", headers: JSON_HEADERS, body: "{}"});
+    toast(`${r.changed} von ${r.scanned} Umsätzen automatisch zugeordnet`);
+    await refreshCategoriesAndData();
+  } catch (e) {
+    showError(e.message);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
 document.querySelectorAll(".gran-btn").forEach(b => b.addEventListener("click", () => {
   document.querySelectorAll(".gran-btn").forEach(x =>
     x.className = "gran-btn px-3 py-1 text-sm rounded bg-slate-200 text-slate-700");

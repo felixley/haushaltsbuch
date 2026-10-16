@@ -34,6 +34,7 @@ from transaktionen_speichern import (
     insert_transactions,
     upsert_account,
 )
+from web.kategorien import ensure_default_categories, categorize
 
 BANKS = {
     "comdirect": "comdirect",
@@ -298,6 +299,30 @@ def _safe_message(exc: Exception, pin: str | None) -> str:
     return msg
 
 
+def _categorize_account(conn: sqlite3.Connection, account_iban: str) -> int:
+    """Kategorisiert noch nicht zugeordnete Umsätze eines Kontos automatisch.
+
+    Es werden nur Zeilen mit ``category_id IS NULL`` angefasst, manuell gesetzte
+    Kategorien bleiben also erhalten. Liefert die Anzahl der Zuordnungen.
+    """
+    ensure_default_categories(conn)
+    ids = {row[0]: row[1] for row in conn.execute("SELECT name, id FROM categories")}
+    names = set(ids)
+    rows = conn.execute(
+        """SELECT id, applicant_name, purpose, amount FROM transactions
+           WHERE account_iban = ? AND category_id IS NULL""",
+        (account_iban,),
+    ).fetchall()
+    changed = 0
+    for tx_id, applicant, purpose, amount in rows:
+        proposal = categorize(applicant, purpose, amount, names=names)
+        if proposal is None:
+            continue
+        conn.execute("UPDATE transactions SET category_id = ? WHERE id = ?", (ids[proposal], tx_id))
+        changed += 1
+    return changed
+
+
 def _run(job: Job, cfg: dict, pin: str, days: int, db_path: Path) -> None:
     client = None
     secret = pin  # nur für die Maskierung eventueller Fehlertexte
@@ -329,9 +354,13 @@ def _run(job: Job, cfg: dict, pin: str, days: int, db_path: Path) -> None:
                     data = [t.data for t in result]
                     upsert_account(conn, account)
                     inserted, skipped = insert_transactions(conn, account.iban, data)
+                    # Neue Umsätze sofort automatisch kategorisieren
+                    # (vorhandene/manuelle Zuordnungen bleiben unangetastet).
+                    categorized = _categorize_account(conn, account.iban)
                     conn.commit()
                     per_account[account.iban] = {"new": inserted, "skipped": skipped,
-                                                 "fetched": len(data)}
+                                                 "fetched": len(data),
+                                                 "categorized": categorized}
             finally:
                 conn.close()
 

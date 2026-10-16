@@ -104,7 +104,11 @@
 
   <!-- Kategorien -->
   <div class="bg-white rounded-xl shadow p-4 mt-6 md:w-1/2">
-    <h2 class="font-semibold text-slate-700 mb-2">Kategorien</h2>
+    <div class="flex justify-between items-center mb-2">
+      <h2 class="font-semibold text-slate-700">Kategorien</h2>
+      <button id="auto-cat" title="Ordnet nicht zugeordnete Umsätze anhand von Empfänger und Verwendungszweck automatisch zu"
+              class="px-3 py-1.5 bg-slate-700 text-white rounded text-xs">Automatisch kategorisieren</button>
+    </div>
     <ul id="cat-list" class="text-sm divide-y"></ul>
     <div class="flex gap-2 mt-3">
       <input id="new-cat-name" placeholder="Neue Kategorie" class="border rounded px-2 py-1 text-sm flex-1">
