@@ -34,7 +34,7 @@ from transaktionen_speichern import (
     insert_transactions,
     upsert_account,
 )
-from web.kategorien import ensure_default_categories, categorize
+from web.kategorien import ensure_default_categories, load_learned_rules, suggest_category
 
 BANKS = {
     "comdirect": "comdirect",
@@ -308,6 +308,7 @@ def _categorize_account(conn: sqlite3.Connection, account_iban: str) -> int:
     ensure_default_categories(conn)
     ids = {row[0]: row[1] for row in conn.execute("SELECT name, id FROM categories")}
     names = set(ids)
+    learned = load_learned_rules(conn)
     rows = conn.execute(
         """SELECT id, applicant_name, purpose, amount FROM transactions
            WHERE account_iban = ? AND category_id IS NULL""",
@@ -315,7 +316,7 @@ def _categorize_account(conn: sqlite3.Connection, account_iban: str) -> int:
     ).fetchall()
     changed = 0
     for tx_id, applicant, purpose, amount in rows:
-        proposal = categorize(applicant, purpose, amount, names=names)
+        proposal = suggest_category(learned, applicant, purpose, amount, names=names)
         if proposal is None:
             continue
         conn.execute("UPDATE transactions SET category_id = ? WHERE id = ?", (ids[proposal], tx_id))

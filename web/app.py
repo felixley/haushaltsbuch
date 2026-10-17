@@ -25,7 +25,11 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from web import sync
-from web.kategorien import apply_categorization_to_db, ensure_default_categories
+from web.kategorien import (
+    apply_categorization_to_db,
+    ensure_default_categories,
+    learn_from_manual_assignment,
+)
 from web.partner import clean_partner_name
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -221,9 +225,11 @@ def create_app() -> FastAPI:
                 if cat is None:
                     raise HTTPException(404, "Kategorie nicht gefunden")
                 cat_id, name = cat["id"], cat["name"]
-            conn.execute("UPDATE transactions SET category_id = ? WHERE id = ?", (cat_id, tx_id))
+            # Zuordnung speichern und daraus eine Regel lernen: alle Umsätze mit
+            # demselben Partner + Verwendungszweck erhalten dieselbe Kategorie.
+            updated = learn_from_manual_assignment(conn, tx_id, cat_id)
             conn.commit()
-        return {"ok": True, "category": name}
+        return {"ok": True, "category": name, "updated": updated}
 
     # --- Automatische Kategorisierung -------------------------------
     @app.post("/api/categorize")

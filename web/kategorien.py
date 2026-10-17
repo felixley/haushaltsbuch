@@ -33,6 +33,8 @@ import sys
 import unicodedata
 from pathlib import Path
 
+from web.partner import clean_partner_name
+
 ROOT = Path(__file__).resolve().parent.parent
 
 __all__ = [
@@ -42,6 +44,11 @@ __all__ = [
     "categorize",
     "ensure_default_categories",
     "apply_categorization_to_db",
+    "ensure_learned_rules_table",
+    "load_learned_rules",
+    "learn_from_manual_assignment",
+    "match_key",
+    "suggest_category",
 ]
 
 
@@ -290,6 +297,157 @@ def _category_ids(connection: sqlite3.Connection) -> dict[str, int]:
     return {row[0]: row[1] for row in connection.execute("SELECT name, id FROM categories")}
 
 
+# ------------------------------------------------------------------
+# Gelernte Regeln (aus manueller Zuordnung)
+# ------------------------------------------------------------------
+# Ordnet der Nutzer eine Kombination aus Partner (Empfänger) und
+# Verwendungszweck manuell einer Kategorie zu, wird sie hier festgehalten.
+# Künftige Umsätze mit derselben Kombination werden dann automatisch so
+# zugeordnet – noch vor den eingebauten Regeln (RULES). So „lernt“ das
+# Haushaltsbuch aus einer einmaligen manuellen Zuordnung.
+_LEARNED_RULES_DDL = """\
+CREATE TABLE IF NOT EXISTS learned_rules (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    partner_key TEXT NOT NULL,               -- normalisierter Partner (IBAN-frei)
+    purpose_key TEXT NOT NULL,               -- normalisierter Verwendungszweck
+    category_id INTEGER NOT NULL REFERENCES categories(id) ON DELETE CASCADE,
+    match_count INTEGER NOT NULL DEFAULT 1,  -- so oft die Kombination manuell zugeordnet wurde
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (partner_key, purpose_key)
+);
+"""
+
+
+def ensure_learned_rules_table(connection: sqlite3.Connection) -> None:
+    """Legt die Tabelle ``learned_rules`` an, falls sie fehlt (idempotent)."""
+    connection.executescript(_LEARNED_RULES_DDL)
+
+
+def match_key(applicant_name: str | None, purpose: str | None) -> tuple[str, str]:
+    """Bildet den Vergleichsschlüssel ``(Partner, Verwendungszweck)``.
+
+    Der Partner wird von IBAN-Resten befreit (siehe ``web.partner``) und
+    zusammen mit dem Verwendungszweck auf Kleinschreibung sowie einfache
+    Leerzeichen normalisiert. Dadurch treffen auch Umsätze zusammen, bei
+    denen die Bank die IBAN mal voranstellt und mal nicht.
+    """
+    partner = " ".join(clean_partner_name(applicant_name or "").split()).casefold()
+    zweck = " ".join((purpose or "").split()).casefold()
+    return partner, zweck
+
+
+def load_learned_rules(connection: sqlite3.Connection) -> dict[tuple[str, str], str]:
+    """Bildet ``(Partner, Verwendungszweck)`` auf den gelernten Kategorienamen ab.
+
+    Regeln, deren Kategorie nicht mehr existiert, werden ausgelassen (die
+    Fremdschlüsselbeziehung entfernt sie normalerweise ohnehin).
+    """
+    ensure_learned_rules_table(connection)
+    return {
+        (row[0], row[1]): row[2]
+        for row in connection.execute(
+            """SELECT lr.partner_key, lr.purpose_key, c.name
+                 FROM learned_rules lr
+                 JOIN categories c ON c.id = lr.category_id"""
+        )
+    }
+
+
+def suggest_category(
+    learned: dict[tuple[str, str], str] | None,
+    applicant_name: str | None,
+    purpose: str | None,
+    amount: float | None = None,
+    *,
+    names: set[str] | None = None,
+) -> str | None:
+    """Vorschlag für einen Umsatz: erst gelernte Regeln, dann ``categorize``.
+
+    Eine gelernte Regel (aus einer früheren manuellen Zuordnung) hat Vorrang
+    vor den eingebauten Regeln – der Nutzerwille gewinnt.
+    """
+    if learned:
+        name = learned.get(match_key(applicant_name, purpose))
+        if name is not None and (names is None or name in names):
+            return name
+    return categorize(applicant_name, purpose, amount, names=names)
+
+
+def learn_from_manual_assignment(
+    connection: sqlite3.Connection,
+    tx_id: int,
+    category_id: int | None,
+) -> int:
+    """Merkt sich eine manuelle Zuordnung und wendet sie auf gleiche Umsätze an.
+
+    Der Aufrufer ist für ``commit()`` verantwortlich.
+
+    :param tx_id: der manuell zugeordnete Umsatz.
+    :param category_id: Zielkategorie oder ``None`` (Zuordnung aufheben).
+    :return: Anzahl der Umsätze, die diese Kategorie erhalten haben (inkl. tx_id).
+    """
+    row = connection.execute(
+        "SELECT applicant_name, purpose FROM transactions WHERE id = ?", (tx_id,)
+    ).fetchone()
+    if row is None:
+        return 0
+
+    key = match_key(row[0], row[1])
+    ensure_learned_rules_table(connection)
+
+    if category_id is None:
+        # Zuordnung aufgehoben -> gelernte Regel wieder entfernen, damit künftige
+        # Umsätze nicht fälschlich zugeordnet werden.
+        connection.execute(
+            "DELETE FROM learned_rules WHERE partner_key = ? AND purpose_key = ?", key
+        )
+        connection.execute(
+            "UPDATE transactions SET category_id = NULL WHERE id = ?", (tx_id,)
+        )
+        return 0
+
+    # Regel merken bzw. aktualisieren (match_count zählt manuelle Zuordnungen).
+    connection.execute(
+        """INSERT INTO learned_rules (partner_key, purpose_key, category_id)
+               VALUES (?, ?, ?)
+           ON CONFLICT(partner_key, purpose_key) DO UPDATE SET
+                   category_id = excluded.category_id,
+                   match_count = learned_rules.match_count + 1,
+                   updated_at  = datetime('now')""",
+        (key[0], key[1], category_id),
+    )
+    return _apply_learned_rule(connection, key, category_id, target_id=tx_id)
+
+
+def _apply_learned_rule(
+    connection: sqlite3.Connection,
+    key: tuple[str, str],
+    category_id: int,
+    *,
+    target_id: int | None = None,
+) -> int:
+    """Setzt die Kategorie für ``target_id`` und alle noch offenen gleichen Umsätze.
+
+    Bereits zugeordnete Umsätze (z. B. eine abweichende manuelle Zuordnung)
+    bleiben unangetastet – nur leere Zuordnungen werden gefüllt.
+    """
+    changed = 0
+    rows = connection.execute(
+        "SELECT id, applicant_name, purpose, category_id FROM transactions"
+    ).fetchall()
+    for tx_id, applicant, purpose, current in rows:
+        if match_key(applicant, purpose) != key:
+            continue
+        if tx_id != target_id and current is not None:
+            continue
+        connection.execute(
+            "UPDATE transactions SET category_id = ? WHERE id = ?", (category_id, tx_id)
+        )
+        changed += 1
+    return changed
+
+
 def apply_categorization_to_db(
     db_path: Path,
     *,
@@ -308,6 +466,7 @@ def apply_categorization_to_db(
         ensure_default_categories(conn)
         ids = _category_ids(conn)
         names = set(ids)
+        learned = load_learned_rules(conn)
 
         where = "WHERE t.category_id IS NULL" if only_uncategorized else ""
         rows = conn.execute(
@@ -318,7 +477,9 @@ def apply_categorization_to_db(
         scanned = len(rows)
         changed = 0
         for row in rows:
-            proposal = categorize(row["applicant_name"], row["purpose"], row["amount"], names=names)
+            proposal = suggest_category(
+                learned, row["applicant_name"], row["purpose"], row["amount"], names=names
+            )
             if proposal is None:
                 continue
             changed += 1

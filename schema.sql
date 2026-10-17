@@ -45,6 +45,28 @@ CREATE TABLE IF NOT EXISTS categories (
 );
 
 -- ------------------------------------------------------------
+-- Gelernte Regeln (aus manueller Zuordnung)
+-- ------------------------------------------------------------
+-- Ordnet der Nutzer eine Kombination aus Partner (Empfänger) und
+-- Verwendungszweck manuell einer Kategorie zu, wird diese Zuordnung
+-- hier festgehalten. Alle Umsätze mit derselben Kombination erhalten
+-- die Kategorie dann automatisch – auch künftige Importe.
+--
+-- partner_key / purpose_key sind normalisierte Vergleichswerte
+-- (klein geschrieben, einfache Leerzeichen, IBAN aus dem Partner
+-- entfernt) – siehe web/kategorien.py, match_key().
+CREATE TABLE IF NOT EXISTS learned_rules (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    partner_key TEXT NOT NULL,               -- normalisierter Partner (IBAN-frei)
+    purpose_key TEXT NOT NULL,               -- normalisierter Verwendungszweck
+    category_id INTEGER NOT NULL REFERENCES categories(id) ON DELETE CASCADE,
+    match_count INTEGER NOT NULL DEFAULT 1,  -- so oft die Kombination manuell zugeordnet wurde
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (partner_key, purpose_key)
+);
+
+-- ------------------------------------------------------------
 -- Umsätze / Transaktionen
 -- ------------------------------------------------------------
 -- Die Spalten bilden die in der Regel vorhandenen Felder des

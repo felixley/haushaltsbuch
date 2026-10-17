@@ -175,6 +175,13 @@ Der Verwendungszweck wird von den Banken oft ohne Trennzeichen aneinandergehäng
   Import automatisch (gleiche Regeln, nur leere Zuordnungen). Damit bleiben in
   einem Container, der nur per uvicorn läuft, nicht mehr alle Umsätze
   `Nicht zugeordnet`.
+- **Lernende Regeln:** Ordnest du einen Umsatz im Dashboard manuell einer
+  Kategorie zu, merkt sich das Haushaltsbuch die Kombination aus Partner und
+  Verwendungszweck. Alle Umsätze mit derselben Kombination – bereits vorhandene
+  (sofern noch leer) und künftige – erhalten dann automatisch diese Kategorie.
+  Gelernte Regeln haben Vorrang vor den eingebauten Regeln. Hebst du die
+  Zuordnung wieder auf (*Nicht zugeordnet*), wird die gelernte Regel entfernt.
+  Die Regeln liegen in der Tabelle `learned_rules` (siehe `schema.sql`).
 
 Vorhandene Umsätze einmalig zuordnen:
 

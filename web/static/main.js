@@ -125,11 +125,15 @@ async function loadTransactions() {
   body.querySelectorAll(".cat-select").forEach((sel) => {
     sel.addEventListener("change", async () => {
       try {
-        await api(`/api/transactions/${sel.dataset.tx}/category`, {
+        const res = await api(`/api/transactions/${sel.dataset.tx}/category`, {
           method: "PATCH", headers: JSON_HEADERS,
           body: JSON.stringify({category_id: sel.value ? +sel.value : null}),
         });
-        toast("Kategorie gespeichert");
+        const n = res.updated ?? 1;
+        toast(n > 1
+          ? `Kategorie gespeichert · auf ${n} Umsätze angewandt`
+          : "Kategorie gespeichert");
+        loadTransactions();
         loadBreakdown();
       } catch (e) { showError(e.message); }
     });
