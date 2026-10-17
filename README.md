@@ -142,6 +142,13 @@ Enthalten: Kennzahlen, Einnahmen/Ausgaben (monatlich/jährlich), Kategorie-Auswe
 Umsatztabelle mit Filtern (Suche, Kategorie, Konto, Zeitraum, Paging),
 Kategorien verwalten, Kategorie je Umsatz setzen.
 
+**Interne Transfers zählen nicht mit:** Umsätze in einer Umbuchungs-Kategorie
+(`Transfers (intern)`, `Transferintern`, `Interner Transfer`, `Umbuchung`,
+`Interne Umbuchung`, erkannt über `web/kategorien.py:internal_transfer_category_ids`)
+werden aus Kennzahlen, Timeline und Kategorien-Grafik herausgehalten – sonst
+würde z. B. eine Überweisung zwischen eigenen Konten Einnahmen und Ausgaben
+gleichzeitig aufblähen. In der Umsatztabelle bleiben sie sichtbar.
+
 **Partner-Spalte ohne IBAN:** Manche Banken hängen im Feld `applicant_name`
 die IBAN des Gegenkontos direkt an den Namen (z. B.
 `DE03760300800870717444FELIX LEY`). Beim Anzeigen der Umsatztabelle wird in

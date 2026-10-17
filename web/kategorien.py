@@ -49,7 +49,43 @@ __all__ = [
     "learn_from_manual_assignment",
     "match_key",
     "suggest_category",
+    "internal_transfer_category_ids",
 ]
+
+
+def _category_key(name: str) -> str:
+    """Normalisierter Kategoriename: nur Kleinbuchstaben/Ziffern."""
+    return re.sub(r"[^a-z0-9]", "", str(name or "").casefold())
+
+
+# Namen, unter denen eine Kategorie "interner Transfer / Umbuchung" bedeutet.
+# Deckt die Vorschlagskategorie "Transfers (intern)" ebenso ab wie manuell
+# angelegte Varianten ("Transferintern", "Interner Transfer", "Umbuchung").
+_INTERNAL_TRANSFER_KEYS = {
+    "transferintern",
+    "transfersintern",
+    "interntransfer",
+    "internertransfer",
+}
+
+
+def internal_transfer_category_ids(connection: sqlite3.Connection) -> list[int]:
+    """IDs der Kategorien, die interne Transfers/Umbuchungen abbilden.
+
+    Solche Umsätze sind keine echten Einnahmen oder Ausgaben (Geld wandert nur
+    zwischen eigenen Konten) und werden deshalb aus Kennzahlen und Grafiken
+    herausgehalten – in der Umsatztabelle bleiben sie sichtbar.
+    """
+    ids: list[int] = []
+    for category_id, name in connection.execute("SELECT id, name FROM categories"):
+        key = _category_key(name)
+        if (
+            key in _INTERNAL_TRANSFER_KEYS
+            or "umbuchung" in key          # "Umbuchung", "Interne Umbuchung"
+            or ("transfer" in key and "intern" in key)
+        ):
+            ids.append(category_id)
+    return ids
 
 
 # ------------------------------------------------------------------

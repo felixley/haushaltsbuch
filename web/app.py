@@ -30,6 +30,7 @@ from web.kategorien import (
     apply_rule_to_all_matches,
     count_other_matches,
     ensure_default_categories,
+    internal_transfer_category_ids,
     learn_from_manual_assignment,
 )
 from web.partner import clean_partner_name
@@ -116,6 +117,20 @@ def _where_clause(where: list[str]) -> str:
     return (" WHERE " + " AND ".join(where)) if where else ""
 
 
+def _exclude_internal_transfers(
+    where: list[str], params: list[object], category_ids: list[int]
+) -> None:
+    """Interne Transfers/Umbuchungen aus Auswertungen heraushalten.
+
+    Betrifft nur Kennzahlen und Grafiken – die Umsatztabelle zeigt sie
+    weiterhin, damit man sie prüfen und umkategorisieren kann.
+    """
+    if category_ids:
+        placeholders = ", ".join("?" for _ in category_ids)
+        where.append(f"t.category_id NOT IN ({placeholders})")
+        params.extend(category_ids)
+
+
 # ------------------------------------------------------------------
 # App
 # ------------------------------------------------------------------
@@ -147,17 +162,20 @@ def create_app() -> FastAPI:
         # Zeitraum-Modus: sobald ein Datumsfilter gesetzt ist, beziehen sich
         # Einnahmen/Ausgaben auf diesen Zeitraum statt auf den aktuellen Monat.
         range_mode = bool(date_from or date_to)
-        where, params = _filter_clause(
-            search=search, category_id=category_id, account_id=account_id,
-            date_from=date_from, date_to=date_to,
-        )
-        clause = _where_clause(where)
-        period_where, period_params = list(where), list(params)
-        if not range_mode:
-            period_where.append("t.booking_date >= ?")
-            period_params.append(dt.date.today().replace(day=1).isoformat())
-        period_clause = _where_clause(period_where)
         with connect() as conn:
+            # Interne Transfers/Umbuchungen sind keine echten Einnahmen/Ausgaben.
+            transfers = internal_transfer_category_ids(conn)
+            where, params = _filter_clause(
+                search=search, category_id=category_id, account_id=account_id,
+                date_from=date_from, date_to=date_to,
+            )
+            _exclude_internal_transfers(where, params, transfers)
+            clause = _where_clause(where)
+            period_where, period_params = list(where), list(params)
+            if not range_mode:
+                period_where.append("t.booking_date >= ?")
+                period_params.append(dt.date.today().replace(day=1).isoformat())
+            period_clause = _where_clause(period_where)
             all_amounts = [r[0] for r in conn.execute(
                 f"SELECT t.amount FROM transactions t{clause}", params)]
             period = [r[0] for r in conn.execute(
@@ -186,12 +204,14 @@ def create_app() -> FastAPI:
     ):
         length = 7 if granularity == "monthly" else 4  # 'YYYY-MM' bzw. 'YYYY'
         agg: dict[str, dict[str, float]] = defaultdict(lambda: {"income": 0.0, "expenses": 0.0})
-        where, params = _filter_clause(
-            search=search, category_id=category_id, account_id=account_id,
-            date_from=date_from, date_to=date_to,
-        )
-        clause = _where_clause(where)
         with connect() as conn:
+            where, params = _filter_clause(
+                search=search, category_id=category_id, account_id=account_id,
+                date_from=date_from, date_to=date_to,
+            )
+            _exclude_internal_transfers(
+                where, params, internal_transfer_category_ids(conn))
+            clause = _where_clause(where)
             rows = conn.execute(
                 f"SELECT t.booking_date, t.amount FROM transactions t{clause}", params
             ).fetchall()
@@ -218,12 +238,14 @@ def create_app() -> FastAPI:
         date_to: str | None = None,
     ):
         totals: dict[str, float] = defaultdict(float)
-        where, params = _filter_clause(
-            search=search, category_id=category_id, account_id=account_id,
-            date_from=date_from, date_to=date_to,
-        )
-        clause = _where_clause(where)
         with connect() as conn:
+            where, params = _filter_clause(
+                search=search, category_id=category_id, account_id=account_id,
+                date_from=date_from, date_to=date_to,
+            )
+            _exclude_internal_transfers(
+                where, params, internal_transfer_category_ids(conn))
+            clause = _where_clause(where)
             rows = conn.execute(
                 f"""SELECT COALESCE(c.name, 'Nicht zugeordnet') AS name, t.amount
                     FROM transactions t LEFT JOIN categories c ON c.id = t.category_id{clause}""",
