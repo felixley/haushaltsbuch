@@ -77,6 +77,45 @@ def _round(v: float) -> float:
     return round(v, 2)
 
 
+def _filter_clause(
+    *,
+    search: str = "",
+    category_id: int | None = None,
+    account_id: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    alias: str = "t",
+) -> tuple[list[str], list[object]]:
+    """Baut die WHERE-Bedingungen der Filterleiste (Tabelle und Auswertungen).
+
+    Kennzahlen, Timeline und Kategorien-Grafik nutzen exakt dieselben Filter
+    wie ``/api/transactions`` – sonst zeigen die Kacheln oben andere Zahlen als
+    die darunter gefilterte Tabelle.
+    """
+    where: list[str] = []
+    params: list[object] = []
+    if search:
+        where.append(f"({alias}.applicant_name LIKE ? OR {alias}.purpose LIKE ?)")
+        params += [f"%{search}%", f"%{search}%"]
+    if category_id is not None:
+        where.append(f"{alias}.category_id = ?")
+        params.append(category_id)
+    if account_id:
+        where.append(f"{alias}.account_iban = ?")
+        params.append(account_id)
+    if date_from:
+        where.append(f"{alias}.booking_date >= ?")
+        params.append(date_from)
+    if date_to:
+        where.append(f"{alias}.booking_date <= ?")
+        params.append(date_to)
+    return where, params
+
+
+def _where_clause(where: list[str]) -> str:
+    return (" WHERE " + " AND ".join(where)) if where else ""
+
+
 # ------------------------------------------------------------------
 # App
 # ------------------------------------------------------------------
@@ -98,39 +137,63 @@ def create_app() -> FastAPI:
 
     # --- Kennzahlen -------------------------------------------------
     @app.get("/api/kpis")
-    def kpis(account_id: str | None = None):
-        month_start = dt.date.today().replace(day=1).isoformat()
-        where, params = "", []
-        if account_id:
-            where, params = " WHERE account_iban = ?", [account_id]
-        month_where = f"{where} AND booking_date >= ?" if where else " WHERE booking_date >= ?"
+    def kpis(
+        search: str = "",
+        category_id: int | None = None,
+        account_id: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+    ):
+        # Zeitraum-Modus: sobald ein Datumsfilter gesetzt ist, beziehen sich
+        # Einnahmen/Ausgaben auf diesen Zeitraum statt auf den aktuellen Monat.
+        range_mode = bool(date_from or date_to)
+        where, params = _filter_clause(
+            search=search, category_id=category_id, account_id=account_id,
+            date_from=date_from, date_to=date_to,
+        )
+        clause = _where_clause(where)
+        period_where, period_params = list(where), list(params)
+        if not range_mode:
+            period_where.append("t.booking_date >= ?")
+            period_params.append(dt.date.today().replace(day=1).isoformat())
+        period_clause = _where_clause(period_where)
         with connect() as conn:
             all_amounts = [r[0] for r in conn.execute(
-                f"SELECT amount FROM transactions{where}", params)]
-            month = [r[0] for r in conn.execute(
-                f"SELECT amount FROM transactions{month_where}", [*params, month_start])]
+                f"SELECT t.amount FROM transactions t{clause}", params)]
+            period = [r[0] for r in conn.execute(
+                f"SELECT t.amount FROM transactions t{period_clause}", period_params)]
         total = sum(_money(a) for a in all_amounts)
-        income = sum(_money(a) for a in month if _money(a) > 0)
-        expenses = sum(_money(a) for a in month if _money(a) < 0)
+        income = sum(_money(a) for a in period if _money(a) > 0)
+        expenses = sum(_money(a) for a in period if _money(a) < 0)
         return {
             # Hinweis: Bankkontostand wird noch nicht gespeichert -> Summe aller Umsätze
             "total_balance": _round(total),
             "income_month": _round(income),
             "expenses_month": _round(expenses),
             "net_cashflow": _round(income + expenses),
+            # "month" = aktueller Monat, "range" = gesetzter Datumsfilter
+            "period_mode": "range" if range_mode else "month",
         }
 
     @app.get("/api/timeline")
     def timeline(
         granularity: str = Query("monthly", pattern="^(monthly|yearly)$"),
+        search: str = "",
+        category_id: int | None = None,
         account_id: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
     ):
         length = 7 if granularity == "monthly" else 4  # 'YYYY-MM' bzw. 'YYYY'
         agg: dict[str, dict[str, float]] = defaultdict(lambda: {"income": 0.0, "expenses": 0.0})
-        where, params = (" WHERE account_iban = ?", [account_id]) if account_id else ("", [])
+        where, params = _filter_clause(
+            search=search, category_id=category_id, account_id=account_id,
+            date_from=date_from, date_to=date_to,
+        )
+        clause = _where_clause(where)
         with connect() as conn:
             rows = conn.execute(
-                f"SELECT booking_date, amount FROM transactions{where}", params
+                f"SELECT t.booking_date, t.amount FROM transactions t{clause}", params
             ).fetchall()
         for booking_date, amount in rows:
             if not booking_date:
@@ -147,13 +210,23 @@ def create_app() -> FastAPI:
         ]
 
     @app.get("/api/categories/breakdown")
-    def breakdown(account_id: str | None = None):
+    def breakdown(
+        search: str = "",
+        category_id: int | None = None,
+        account_id: str | None = None,
+        date_from: str | None = None,
+        date_to: str | None = None,
+    ):
         totals: dict[str, float] = defaultdict(float)
-        where, params = (" WHERE t.account_iban = ?", [account_id]) if account_id else ("", [])
+        where, params = _filter_clause(
+            search=search, category_id=category_id, account_id=account_id,
+            date_from=date_from, date_to=date_to,
+        )
+        clause = _where_clause(where)
         with connect() as conn:
             rows = conn.execute(
                 f"""SELECT COALESCE(c.name, 'Nicht zugeordnet') AS name, t.amount
-                    FROM transactions t LEFT JOIN categories c ON c.id = t.category_id{where}""",
+                    FROM transactions t LEFT JOIN categories c ON c.id = t.category_id{clause}""",
                 params,
             ).fetchall()
         for name, amount in rows:
@@ -176,23 +249,11 @@ def create_app() -> FastAPI:
         page: int = 1,
         per_page: int = Query(25, le=100),
     ):
-        where, params = [], []
-        if search:
-            where.append("(t.applicant_name LIKE ? OR t.purpose LIKE ?)")
-            params += [f"%{search}%", f"%{search}%"]
-        if category_id is not None:
-            where.append("t.category_id = ?")
-            params.append(category_id)
-        if account_id:
-            where.append("t.account_iban = ?")
-            params.append(account_id)
-        if date_from:
-            where.append("t.booking_date >= ?")
-            params.append(date_from)
-        if date_to:
-            where.append("t.booking_date <= ?")
-            params.append(date_to)
-        clause = ("WHERE " + " AND ".join(where)) if where else ""
+        where, params = _filter_clause(
+            search=search, category_id=category_id, account_id=account_id,
+            date_from=date_from, date_to=date_to,
+        )
+        clause = _where_clause(where)
         page = max(page, 1)
         with connect() as conn:
             total = conn.execute(f"SELECT COUNT(*) FROM transactions t {clause}", params).fetchone()[0]

@@ -102,6 +102,7 @@ def test_unbekanntes_konto_liefert_leere_auswertung(tmp_path, monkeypatch) -> No
         t = client.get("/api/timeline", params={"account_id": "DE99999999999999999999"}).json()
         b = client.get("/api/categories/breakdown", params={"account_id": "DE99999999999999999999"}).json()
     assert k == {"total_balance": 0.0, "income_month": 0.0,
-                 "expenses_month": 0.0, "net_cashflow": 0.0}
+                 "expenses_month": 0.0, "net_cashflow": 0.0,
+                 "period_mode": "month"}
     assert t == []
     assert b == []

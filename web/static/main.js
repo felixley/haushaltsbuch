@@ -34,31 +34,54 @@ async function api(path, opts) {
 
 const JSON_HEADERS = {"Content-Type": "application/json"};
 
-// Aktuell im Filter gewähltes Konto -> Query-Fragment für die Chart-Endpunkte.
-function accountQuery(prefix = "?") {
+// Alle Filter der Leiste unten als Query-Parameter. Kennzahlen, Timeline und
+// Kategorien-Grafik nutzen exakt dieselben Filter wie die Umsatztabelle.
+function filterParams() {
+  const params = new URLSearchParams();
+  const search = $("f-search").value.trim();
+  const cat = $("f-category").value;
   const acct = $("f-account").value;
-  return acct ? `${prefix}account_id=${encodeURIComponent(acct)}` : "";
+  const from = $("f-from").value;
+  const to = $("f-to").value;
+  if (search) params.set("search", search);
+  if (cat) params.set("category_id", cat);
+  if (acct) params.set("account_id", acct);
+  if (from) params.set("date_from", from);
+  if (to) params.set("date_to", to);
+  return params;
+}
+
+function withQuery(path, extra = {}) {
+  const params = filterParams();
+  for (const [key, value] of Object.entries(extra)) params.set(key, value);
+  const qs = params.toString();
+  return qs ? `${path}?${qs}` : path;
 }
 
 function currentGranularity() {
   return document.querySelector(".gran-btn.bg-blue-600")?.dataset.gran || "monthly";
 }
 
-// Konto-Filter wirkt auf Kennzahlen, Timeline und Kategorien-Grafik.
+// Filter wirken auf Kennzahlen, Timeline und Kategorien-Grafik.
 async function loadCharts() {
   await Promise.all([loadKpis(), loadTimeline(currentGranularity()), loadBreakdown()]);
 }
 
 async function loadKpis() {
-  const k = await api(`/api/kpis${accountQuery()}`);
+  const k = await api(withQuery("/api/kpis"));
   $("kpi-balance").textContent = fmtEUR(k.total_balance);
   $("kpi-income").textContent = fmtEUR(k.income_month);
   $("kpi-expenses").textContent = fmtEUR(k.expenses_month);
   $("kpi-net").textContent = fmtEUR(k.net_cashflow);
+  // Bei gesetztem Datumsfilter beziehen sich Einnahmen/Ausgaben auf den
+  // Zeitraum statt auf den aktuellen Monat – das muss auch dranstehen.
+  const range = k.period_mode === "range";
+  $("kpi-income-label").textContent = range ? "Einkommen (Zeitraum)" : "Einkommen (Monat)";
+  $("kpi-expenses-label").textContent = range ? "Ausgaben (Zeitraum)" : "Ausgaben (Monat)";
 }
 
 async function loadTimeline(granularity = "monthly") {
-  const data = await api(`/api/timeline?granularity=${granularity}${accountQuery("&")}`);
+  const data = await api(withQuery("/api/timeline", {granularity}));
   const labels = data.map(d => d.period);
   const income = data.map(d => d.income);
   const expenses = data.map(d => Math.abs(d.expenses));
@@ -88,7 +111,7 @@ function palette(n) {
 }
 
 async function loadBreakdown() {
-  const data = await api(`/api/categories/breakdown${accountQuery()}`);
+  const data = await api(withQuery("/api/categories/breakdown"));
   const total = data.reduce((s, d) => s + d.total, 0);
   const labels = data.map(d => d.category);
   const values = data.map(d => d.total);
@@ -108,16 +131,8 @@ async function loadBreakdown() {
 }
 
 async function loadTransactions() {
-  const params = new URLSearchParams({search: $("f-search").value, page});
-  const cat = $("f-category").value;
-  const acct = $("f-account").value;
-  const from = $("f-from").value;
-  const to = $("f-to").value;
-  if (cat) params.set("category_id", cat);
-  if (acct) params.set("account_id", acct);
-  if (from) params.set("date_from", from);
-  if (to) params.set("date_to", to);
-
+  const params = filterParams();
+  params.set("page", page);
   const data = await api(`/api/transactions?${params}`);
   const body = $("tx-body");
   body.innerHTML = "";
@@ -243,15 +258,20 @@ document.querySelectorAll(".gran-btn").forEach(b => b.addEventListener("click", 
   loadTimeline(b.dataset.gran).catch(e => showError(e.message));
 }));
 
-// Kontowechsel aktualisiert Tabelle UND alle Grafiken – die Kennzahlen,
-// die Timeline und der Kategorien-Donut beziehen sich dann nur auf dieses Konto.
-$("f-account").addEventListener("change", () => {
+// Ein Filterwechsel (Konto, Kategorie, Zeitraum) aktualisiert Tabelle UND alle
+// Auswertungen oben – die Kennzahlen beziehen sich dann nur auf die Auswahl.
+function applyFilters() {
   page = 1;
   Promise.all([loadCharts(), loadTransactions()]).catch(e => showError(e.message));
-});
+}
 
-$("f-apply").addEventListener("click", () => { page = 1; loadTransactions().catch(e => showError(e.message)); });
-$("f-search").addEventListener("keydown", (e) => { if (e.key === "Enter") $("f-apply").click(); });
+$("f-account").addEventListener("change", applyFilters);
+$("f-category").addEventListener("change", applyFilters);
+$("f-from").addEventListener("change", applyFilters);
+$("f-to").addEventListener("change", applyFilters);
+
+$("f-apply").addEventListener("click", applyFilters);
+$("f-search").addEventListener("keydown", (e) => { if (e.key === "Enter") applyFilters(); });
 $("prev-page").addEventListener("click", () => { if (page > 1) { page--; loadTransactions().catch(e => showError(e.message)); } });
 $("next-page").addEventListener("click", () => { page++; loadTransactions().catch(e => showError(e.message)); });
 
