@@ -37,7 +37,7 @@ load_dotenv()
 from fints_session import create_client  # gemeinsamer Verbindungsaufbau (wie finance-tracker)
 
 # Automatische Kategorisierung + Vorschlagskategorien (web/kategorien.py).
-from web.kategorien import ensure_default_categories
+from web.kategorien import apply_categorization_to_db, ensure_default_categories
 
 SCHEMA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "schema.sql")
 
@@ -458,6 +458,13 @@ def main():
             connection.close()
 
     if not args.dry_run:
+        # Nach dem Import die noch offenen Umsätze automatisch kategorisieren –
+        # genau wie der Dashboard-Bankabruf (web/sync.py) und der Button
+        # "Automatisch kategorisieren" (POST /api/categorize). Nur Zeilen ohne
+        # category_id werden angefasst, manuelle Zuordnungen bleiben erhalten.
+        scanned, changed = apply_categorization_to_db(db_path)
+        print(f"-> Automatisch kategorisiert: {changed} von {scanned} offenen "
+              f"Umsätzen zugeordnet.")
         print(f"\nFertig. {total_new} neue Umsätze geschrieben, "
               f"{total_skipped} bereits vorhanden (übersprungen).")
         print("Zum Ansehen: python db_anzeigen.py")

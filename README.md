@@ -171,6 +171,10 @@ Der Verwendungszweck wird von den Banken oft ohne Trennzeichen aneinandergehäng
   **Automatisch kategorisieren** alle noch leeren Zuordnungen zu
   (`POST /api/categorize`). Beim Bankabruf (`web/sync.py`) werden neue Umsätze
   automatisch kategorisiert.
+- **Headless-Import:** Auch `transaktionen_speichern.py` kategorisiert nach dem
+  Import automatisch (gleiche Regeln, nur leere Zuordnungen). Damit bleiben in
+  einem Container, der nur per uvicorn läuft, nicht mehr alle Umsätze
+  `Nicht zugeordnet`.
 
 Vorhandene Umsätze einmalig zuordnen:
 
