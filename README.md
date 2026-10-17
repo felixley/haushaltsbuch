@@ -87,9 +87,22 @@ Für jedes Konto wird:
 2. jeder Umsatz aus `results[].data` strukturiert in `transactions` geschrieben,
 3. das komplette Roh-Dict zusätzlich als JSON in der Spalte `raw` gesichert.
 
-**Duplikate:** Jeder Umsatz bekommt einen `dedup_hash` (Konto + Datum +
-Betrag + Währung + Referenzen). Ein erneuter Import legt bereits
-vorhandene Umsätze daher nicht doppelt an (`ON CONFLICT DO NOTHING`).
+**Duplikate:** Jeder Umsatz bekommt einen `dedup_hash` aus den stabilen
+Merkmalen Konto + Buchungsdatum + Betrag + Währung + Empfänger +
+Verwendungszweck. Status, Bankreferenzen und `extra_details` gehören
+bewusst **nicht** dazu: Sie ändern sich zwischen zwei Abrufen (z. B.
+vorgemerkt `PDNG` -> gebucht `C` oder eine neu vergebene Referenz) und
+führten früher zu doppelten Zeilen. Ein erneuter Import aktualisiert
+stattdessen die veränderlichen Felder des vorhandenen Umsatzes
+(`ON CONFLICT DO UPDATE`), die Kategorie bleibt unangetastet.
+
+Bestehende Duplikate aus älteren Versionen werden beim nächsten Import
+automatisch zusammengeführt (einmalig, danach schützt der Unique-Index).
+Das geht auch ohne Bankabruf:
+
+```bash
+python transaktionen_speichern.py --repair-only --db finance.db
+```
 
 **Pflichtfelder:** `applicant_name` (Empfänger/Auftraggeber) und `purpose`
 (Verwendungszweck-Text) sind Pflichtspalten (`NOT NULL`). Liefert die Bank

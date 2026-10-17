@@ -73,6 +73,18 @@ def apply_schema(connection: sqlite3.Connection) -> None:
     _migrate(connection)
     # Vorschlagskategorien (idempotent) – nur anlegen, nichts überschreiben.
     ensure_default_categories(connection)
+    # Einmalige Bereinigung alter Duplikate: Der frühere Hash enthielt Status
+    # und Referenzen, die sich zwischen Abrufen ändern können. Existiert der
+    # neue Unique-Index noch nicht, werden die Hashes neu berechnet und
+    # Dubletten zusammengeführt. Danach ist der Index da und der Lauf entfällt.
+    has_index = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'idx_transactions_dedup_hash'"
+    ).fetchone()
+    if has_index is None:
+        report = repair_duplicates(connection)
+        if report["merged"]:
+            print(f"-> {report['merged']} doppelte Umsätze zusammengeführt "
+                  f"({report['unique']} eindeutige von {report['rows']} Zeilen).")
     connection.commit()
 
 
@@ -181,25 +193,75 @@ def _to_text_required(value):
     return str(value)
 
 
-def _make_dedup_hash(account_iban: str, data: dict) -> str:
-    """Baut einen stabilen Hash zur Duplikaterkennung eines Umsatzes.
+def _norm_text(value) -> str:
+    """Normalisiert Text für den Duplikat-Vergleich (Groß/Klein, Leerraum)."""
+    return " ".join(str(value or "").split()).casefold()
 
-    Basis sind Konto, Buchungsdatum, Betrag, Währung, Status sowie die
-    vorhandenen Referenzen. Dadurch wird derselbe Umsatz bei einem
-    erneuten Import nicht doppelt angelegt.
+
+def _norm_iban(value) -> str:
+    """IBAN ohne Leerzeichen, Großbuchstaben (Banken liefern beides)."""
+    return "".join(str(value or "").split()).upper()
+
+
+def _norm_amount(value) -> str:
+    """Betrag ohne unnötige Nullen/Exponenten (100.00 == 100 == 1E+2)."""
+    if value in (None, ""):
+        return ""
+    try:
+        d = Decimal(str(getattr(value, "amount", value))).normalize()
+    except Exception:
+        return str(value)
+    if d == 0:
+        d = abs(d)  # -0 -> 0
+    return format(d, "f")
+
+
+def _norm_date(value) -> str:
+    """Datum als 'YYYY-MM-DD' (Strings werden auf 10 Zeichen gekürzt)."""
+    iso = _to_iso_date(value)
+    return iso[:10] if iso else ""
+
+
+def identity_hash(
+    account_iban,
+    booking_date,
+    amount,
+    currency,
+    applicant_name,
+    purpose,
+) -> str:
+    """Stabiler Identitäts-Hash eines Umsatzes für die Duplikaterkennung.
+
+    Basis sind nur Merkmale, die sich bei einem erneuten Abruf **nicht
+    verändern**: Konto, Buchungsdatum, Betrag, Währung, Empfänger und
+    Verwendungszweck. Status, Referenzen und ``extra_details`` bleiben
+    bewusst draußen – genau diese Felder ändern sich zwischen zwei Abrufen
+    (z. B. ``PDNG`` -> ``C`` oder eine erst nach der Buchung vergebene
+    Bankreferenz). Standen sie im Hash, wurde derselbe Umsatz beim nächsten
+    Abruf erneut eingefügt.
     """
     parts = [
-        account_iban or "",
-        _to_iso_date(data.get("date")) or "",
-        _to_decimal(data.get("amount")) or "",
-        _to_currency(data) or "",
-        _to_text(data.get("status")) or "",
-        _to_text(data.get("customer_reference")) or "",
-        _to_text(data.get("bank_reference")) or "",
-        _to_text(data.get("extra_details")) or "",
+        _norm_iban(account_iban),
+        _norm_date(booking_date),
+        _norm_amount(amount),
+        str(currency or "").upper(),
+        _norm_text(applicant_name),
+        _norm_text(purpose),
     ]
     blob = "\x1f".join(parts)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def _make_dedup_hash(account_iban: str, data: dict) -> str:
+    """Hash aus einem Bank-``data``-Dict (siehe ``identity_hash``)."""
+    return identity_hash(
+        account_iban,
+        data.get("date"),
+        data.get("amount"),
+        _to_currency(data),
+        data.get("applicant_name"),
+        data.get("purpose"),
+    )
 
 
 def _row_from_data(account_iban: str, data: dict) -> dict:
@@ -250,26 +312,91 @@ def upsert_account(connection: sqlite3.Connection, account) -> None:
 
 
 def insert_transactions(connection: sqlite3.Connection, account_iban: str, data_dicts) -> tuple:
-    """Schreibt mehrere Umsätze; Duplikate werden übersprungen.
+    """Schreibt mehrere Umsätze; Duplikate werden übersprungen bzw. aktualisiert.
 
-    :return: (neu_eingefuegt, uebersprungen)
+    Ein bereits bekannter Umsatz (gleicher ``dedup_hash``) wird **nicht**
+    erneut eingefügt. Seine veränderlichen Felder (Status, Referenzen, Rohdaten)
+    werden aber auf den neuesten Stand gebracht – so wird aus einem zunächst
+    vorgemerkten Umsatz beim nächsten Abruf der gebuchte, ohne dass eine zweite
+    Zeile entsteht. Die Kategorie bleibt dabei unangetastet.
+
+    :return: (neu_eingefuegt, uebersprungen/aktualisiert)
     """
     placeholders = ", ".join("?" for _ in COLUMNS)
+    mutable = [
+        col for col in COLUMNS if col not in ("account_iban", "dedup_hash")
+    ]
     sql = (
         f"INSERT INTO transactions ({', '.join(COLUMNS)}) "
         f"VALUES ({placeholders}) "
-        f"ON CONFLICT(dedup_hash) DO NOTHING"
+        f"ON CONFLICT(dedup_hash) DO UPDATE SET "
+        + ", ".join(f"{col} = excluded.{col}" for col in mutable)
     )
 
     rows = [_row_from_data(account_iban, data) for data in data_dicts]
 
     inserted = 0
     for row in rows:
-        cursor = connection.execute(sql, tuple(row[col] for col in COLUMNS))
-        inserted += cursor.rowcount  # 1 bei Insert, 0 bei Konflikt
+        known = connection.execute(
+            "SELECT 1 FROM transactions WHERE dedup_hash = ?", (row["dedup_hash"],)
+        ).fetchone() is not None
+        connection.execute(sql, tuple(row[col] for col in COLUMNS))
+        if not known:
+            inserted += 1
 
     skipped = len(rows) - inserted
     return inserted, skipped
+
+
+def repair_duplicates(connection: sqlite3.Connection) -> dict:
+    """Vereinheitlicht bestehende Duplikate und rüstet den Unique-Index nach.
+
+    Ältere Importe konnten denselben Umsatz mit unterschiedlichem Status bzw.
+    unterschiedlichen Referenzen zweimal anlegen (der alte Hash enthielt diese
+    Felder). Diese Funktion
+
+    1. berechnet für jede Zeile den stabilen ``identity_hash`` neu,
+    2. behält je Identität genau eine Zeile (bevorzugt eine mit Kategorie),
+    3. löscht die übrigen Duplikate,
+    4. legt den eindeutigen Index auf ``dedup_hash`` an (idempotent).
+
+    Gibt einen Bericht zurück, damit der Aufrufer die Bereinigung belegen kann.
+    """
+    rows = connection.execute(
+        """SELECT id, account_iban, booking_date, amount, currency,
+                  applicant_name, purpose, category_id
+           FROM transactions ORDER BY id"""
+    ).fetchall()
+
+    groups: dict[str, list] = {}
+    for row in rows:
+        # Tupel-Indizes: die Funktion läuft auch auf Verbindungen ohne row_factory.
+        tx_id, iban, datum, betrag, waehrung, name, zweck, category_id = row
+        h = identity_hash(iban, datum, betrag, waehrung, name, zweck)
+        groups.setdefault(h, []).append(
+            {"id": tx_id, "category_id": category_id}
+        )
+
+    merged = 0
+    if rows:
+        # Hash zunächst leeren, damit das Neu-Setzen nicht am Unique-Index
+        # scheitert, während noch alte Hashes in der Tabelle stehen.
+        connection.execute("UPDATE transactions SET dedup_hash = NULL")
+        for h, group in groups.items():
+            keeper = next((r for r in group if r["category_id"] is not None), group[0])
+            for row in group:
+                if row["id"] != keeper["id"]:
+                    connection.execute("DELETE FROM transactions WHERE id = ?", (row["id"],))
+                    merged += 1
+            connection.execute(
+                "UPDATE transactions SET dedup_hash = ? WHERE id = ?", (h, keeper["id"])
+            )
+
+    connection.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_transactions_dedup_hash "
+        "ON transactions (dedup_hash)"
+    )
+    return {"rows": len(rows), "unique": len(groups), "merged": merged}
 
 
 # ------------------------------------------------------------------
@@ -347,6 +474,12 @@ def parse_args():
         help="Pfad zur SQLite-Datei (Default: DB_PATH aus .env oder finance.db).",
     )
     parser.add_argument(
+        "--repair-only",
+        action="store_true",
+        help="Nur die Datenbank bereinigen (Duplikate zusammenführen, Unique-Index "
+             "anlegen). Kein Bankabruf, keine Zugangsdaten nötig.",
+    )
+    parser.add_argument(
         "--bank",
         default=None,
         choices=["comdirect", "dkb"],
@@ -359,6 +492,18 @@ def parse_args():
 def main():
     args = parse_args()
     db_path = args.db
+
+    if args.repair_only:
+        # Schema anwenden -> bereinigt bestehende Duplikate einmalig und legt
+        # den eindeutigen Index auf dedup_hash an.
+        connection = sqlite3.connect(db_path)
+        try:
+            apply_schema(connection)
+            total = connection.execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
+        finally:
+            connection.close()
+        print(f"Fertig. {total} Umsätze in {os.path.abspath(db_path)}.")
+        return
 
     # Bank wählen: --bank von der Kommandozeile hat Vorrang vor BANK aus .env.
     bank = (args.bank or os.getenv('BANK', 'comdirect')).lower()
