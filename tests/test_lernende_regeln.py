@@ -15,6 +15,8 @@ from fastapi.testclient import TestClient
 import web.app as webapp
 from web.kategorien import (
     apply_categorization_to_db,
+    apply_rule_to_all_matches,
+    count_other_matches,
     ensure_default_categories,
     ensure_learned_rules_table,
     learn_from_manual_assignment,
@@ -238,6 +240,108 @@ def test_api_manual_assignment_backfill(tmp_path, monkeypatch) -> None:
         names = {i["id"]: i["category"] for i in data["items"]}
         assert names[1] == "Haushalt & Drogerie"
         assert names[2] == "Haushalt & Drogerie"
+
+
+def test_count_other_matches_meldet_abweichungen(tmp_path) -> None:
+    """Vor dem Überschreiben wird gemeldet, wie viele gleichartige Umsätze abweichen."""
+    db = tmp_path / "t.db"
+    _seed(db, [
+        ("REWE", "KARTENZAHLUNG REWE SAG", "-23.10", "h1"),
+        ("REWE", "KARTENZAHLUNG REWE SAG", "-11.00", "h2"),
+        ("REWE", "KARTENZAHLUNG REWE SAG", "-5.00", "h3"),
+    ])
+    drogerie = _cat_id(db, "Haushalt & Drogerie")
+    barb = _cat_id(db, "Barbeträge")
+
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE transactions SET category_id = ? WHERE id IN (2, 3)", (barb,))
+    conn.commit()
+
+    assert count_other_matches(conn, 1, drogerie) == 2
+    # schon identisch zugeordnet -> nichts zu tun
+    conn.execute("UPDATE transactions SET category_id = ? WHERE id = 2", (drogerie,))
+    assert count_other_matches(conn, 1, drogerie) == 1
+    conn.close()
+
+
+def test_apply_to_all_ueberschreibt_auch_zugeordnete(tmp_path) -> None:
+    """Bestätigtes Überschreiben setzt ALLE Treffer, auch bereits kategorisierte."""
+    db = tmp_path / "t.db"
+    _seed(db, [
+        ("Restaurant Vapiano", "Restaurant Vapiano Zahlung", "-34.80", "h1"),
+        ("Restaurant Vapiano", "Restaurant Vapiano Zahlung", "-21.00", "h2"),
+        ("Restaurant Vapiano", "Restaurant Vapiano Zahlung", "-12.50", "h3"),
+    ])
+    ziel = _cat_id(db, "Restaurants & Cafés")
+    alt = _cat_id(db, "Steuererstattung")
+
+    conn = sqlite3.connect(db)
+    # Alle drei sind bereits (falsch) vorkategorisiert – wie nach "Automatisch kategorisieren".
+    conn.execute("UPDATE transactions SET category_id = ?", (alt,))
+    conn.commit()
+
+    updated = apply_rule_to_all_matches(conn, 1, ziel)
+    conn.commit()
+    conn.close()
+
+    assert updated == 3
+    assert set(_categories_by_id(db).values()) == {"Restaurants & Cafés"}
+
+
+def test_apply_to_all_ist_idempotent(tmp_path) -> None:
+    """Ein zweiter Aufruf mit gleicher Kategorie ändert nichts mehr."""
+    db = tmp_path / "t.db"
+    _seed(db, [("REWE", "KARTENZAHLUNG REWE SAG", "-23.10", "h1")])
+    ziel = _cat_id(db, "Haushalt & Drogerie")
+
+    conn = sqlite3.connect(db)
+    assert apply_rule_to_all_matches(conn, 1, ziel) == 1
+    # Rückgabe zählt Treffer, nicht Änderungen -> bleibt 1, Daten unverändert.
+    assert apply_rule_to_all_matches(conn, 1, ziel) == 1
+    conn.commit()
+    conn.close()
+
+    assert set(_categories_by_id(db).values()) == {"Haushalt & Drogerie"}
+
+
+def test_api_apply_to_all(tmp_path, monkeypatch) -> None:
+    """PATCH liefert ``affected`` und überschreibt erst mit ``apply_to_all``."""
+    db = tmp_path / "t.db"
+    monkeypatch.setattr(webapp, "DB_PATH", db)
+    _seed(db, [
+        ("Restaurant Vapiano", "Restaurant Vapiano Zahlung", "-34.80", "h1"),
+        ("Restaurant Vapiano", "Restaurant Vapiano Zahlung", "-21.00", "h2"),
+        ("Restaurant Vapiano", "Restaurant Vapiano Zahlung", "-12.50", "h3"),
+    ])
+    ziel = _cat_id(db, "Restaurants & Cafés")
+    alt = _cat_id(db, "Steuererstattung")
+
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE transactions SET category_id = ?", (alt,))
+    conn.commit()
+    conn.close()
+
+    with TestClient(webapp.create_app()) as client:
+        # 1) Nur ein Umsatz, Rest bleibt -> affected meldet die 2 anderen
+        r = client.patch("/api/transactions/1/category", json={"category_id": ziel})
+        assert r.status_code == 200
+        assert r.json()["updated"] == 1
+        assert r.json()["affected"] == 2
+
+        cats = {i["id"]: i["category"] for i in client.get("/api/transactions").json()["items"]}
+        assert cats[1] == "Restaurants & Cafés"
+        assert cats[2] == "Steuererstattung"  # unangetastet
+
+        # 2) Bestätigt -> alle drei
+        r = client.patch(
+            "/api/transactions/1/category",
+            json={"category_id": ziel, "apply_to_all": True},
+        )
+        assert r.status_code == 200
+        assert r.json()["updated"] == 3
+
+        cats = {i["id"]: i["category"] for i in client.get("/api/transactions").json()["items"]}
+        assert set(cats.values()) == {"Restaurants & Cafés"}
 
 
 def test_sync_pfad_nutzt_gelernte_regeln(tmp_path) -> None:

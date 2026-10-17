@@ -124,15 +124,36 @@ async function loadTransactions() {
   $("tx-count").textContent = `${data.total} Transaktionen · Seite ${page}`;
   body.querySelectorAll(".cat-select").forEach((sel) => {
     sel.addEventListener("change", async () => {
+      const txId = sel.dataset.tx;
+      const catId = sel.value ? +sel.value : null;
       try {
-        const res = await api(`/api/transactions/${sel.dataset.tx}/category`, {
+        let res = await api(`/api/transactions/${txId}/category`, {
           method: "PATCH", headers: JSON_HEADERS,
-          body: JSON.stringify({category_id: sel.value ? +sel.value : null}),
+          body: JSON.stringify({category_id: catId}),
         });
-        const n = res.updated ?? 1;
-        toast(n > 1
-          ? `Kategorie gespeichert · auf ${n} Umsätze angewandt`
-          : "Kategorie gespeichert");
+        // Backend meldet, wie viele gleichartige Umsätze eine ABWEICHENDE
+        // Kategorie haben. Erst nach Bestätigung werden auch diese überschrieben.
+        if (catId && res.affected > 0) {
+          const ok = confirm(
+            `${res.affected} weitere Umsätze mit gleichem Empfänger und ` +
+            `Verwendungszweck haben eine andere Kategorie.\n\n` +
+            `Auch auf "${res.category}" setzen?`
+          );
+          if (ok) {
+            res = await api(`/api/transactions/${txId}/category`, {
+              method: "PATCH", headers: JSON_HEADERS,
+              body: JSON.stringify({category_id: catId, apply_to_all: true}),
+            });
+            toast(`"${res.category}" auf ${res.updated} Umsätze angewandt`);
+          } else {
+            toast("Nur dieser Umsatz geändert");
+          }
+        } else {
+          const n = res.updated ?? 1;
+          toast(n > 1
+            ? `Kategorie gespeichert · auf ${n} Umsätze angewandt`
+            : "Kategorie gespeichert");
+        }
         loadTransactions();
         loadBreakdown();
       } catch (e) { showError(e.message); }

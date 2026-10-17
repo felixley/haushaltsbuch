@@ -27,6 +27,8 @@ from fastapi.staticfiles import StaticFiles
 from web import sync
 from web.kategorien import (
     apply_categorization_to_db,
+    apply_rule_to_all_matches,
+    count_other_matches,
     ensure_default_categories,
     learn_from_manual_assignment,
 )
@@ -213,7 +215,15 @@ def create_app() -> FastAPI:
 
     @app.patch("/api/transactions/{tx_id}/category")
     def set_category(tx_id: int, body: dict):
+        """Setzt die Kategorie eines Umsatzes und lernt daraus eine Regel.
+
+        Ohne ``apply_to_all`` werden nur noch leere Zuordnungen mitgezogen
+        (manuelle Abweichungen bleiben erhalten). ``affected`` nennt vorab, wie
+        viele weitere Umsätze eine abweichende Kategorie haben – das Frontend
+        fragt daraufhin nach und schickt ``{"apply_to_all": true}``.
+        """
         raw_cat = body.get("category_id")
+        apply_to_all = bool(body.get("apply_to_all"))
         with connect() as conn:
             if conn.execute("SELECT 1 FROM transactions WHERE id = ?", (tx_id,)).fetchone() is None:
                 raise HTTPException(404, "Transaktion nicht gefunden")
@@ -225,11 +235,16 @@ def create_app() -> FastAPI:
                 if cat is None:
                     raise HTTPException(404, "Kategorie nicht gefunden")
                 cat_id, name = cat["id"], cat["name"]
-            # Zuordnung speichern und daraus eine Regel lernen: alle Umsätze mit
-            # demselben Partner + Verwendungszweck erhalten dieselbe Kategorie.
-            updated = learn_from_manual_assignment(conn, tx_id, cat_id)
+            if apply_to_all:
+                # Bestätigter Fall: ALLE Umsätze mit gleichem Partner +
+                # Verwendungszweck überschreiben, auch bereits zugeordnete.
+                updated = apply_rule_to_all_matches(conn, tx_id, cat_id)
+                affected = 0
+            else:
+                updated = learn_from_manual_assignment(conn, tx_id, cat_id)
+                affected = count_other_matches(conn, tx_id, cat_id)
             conn.commit()
-        return {"ok": True, "category": name, "updated": updated}
+        return {"ok": True, "category": name, "updated": updated, "affected": affected}
 
     # --- Automatische Kategorisierung -------------------------------
     @app.post("/api/categorize")

@@ -448,6 +448,88 @@ def _apply_learned_rule(
     return changed
 
 
+def _matching_transactions(
+    connection: sqlite3.Connection, key: tuple[str, str]
+) -> list[tuple[int, str, str, int | None]]:
+    """Alle Umsätze, deren Vergleichsschlüssel ``key`` entspricht."""
+    rows = connection.execute(
+        "SELECT id, applicant_name, purpose, category_id FROM transactions"
+    ).fetchall()
+    return [r for r in rows if match_key(r[1], r[2]) == key]
+
+
+def count_other_matches(
+    connection: sqlite3.Connection,
+    tx_id: int,
+    category_id: int | None,
+) -> int:
+    """Zählt weitere Umsätze mit gleichem Schlüssel, deren Kategorie sich ändern würde.
+
+    Dient der Vorab-Info im Frontend ("betrifft N weitere Umsätze"), bevor der
+    Nutzer das Überschreiben bestehender Zuordnungen bestätigt.
+    """
+    if category_id is None:
+        return 0
+    row = connection.execute(
+        "SELECT applicant_name, purpose FROM transactions WHERE id = ?", (tx_id,)
+    ).fetchone()
+    if row is None:
+        return 0
+    key = match_key(row[0], row[1])
+    return sum(
+        1
+        for tid, _applicant, _purpose, current in _matching_transactions(connection, key)
+        if tid != tx_id and current != category_id
+    )
+
+
+def apply_rule_to_all_matches(
+    connection: sqlite3.Connection,
+    tx_id: int,
+    category_id: int | None,
+) -> int:
+    """Setzt ``category_id`` für ALLE Umsätze mit gleichem Vergleichsschlüssel.
+
+    Anders als ``learn_from_manual_assignment`` werden auch bereits zugeordnete
+    Umsätze überschrieben. Der Aufrufer muss das vorher vom Nutzer bestätigen
+    lassen (``apply_to_all`` im PATCH-Body). Die gelernte Regel wird dabei
+    ebenfalls gespeichert bzw. aktualisiert.
+    """
+    row = connection.execute(
+        "SELECT applicant_name, purpose FROM transactions WHERE id = ?", (tx_id,)
+    ).fetchone()
+    if row is None:
+        return 0
+    key = match_key(row[0], row[1])
+    ensure_learned_rules_table(connection)
+
+    if category_id is None:
+        connection.execute(
+            "DELETE FROM learned_rules WHERE partner_key = ? AND purpose_key = ?", key
+        )
+    else:
+        connection.execute(
+            """INSERT INTO learned_rules (partner_key, purpose_key, category_id)
+                   VALUES (?, ?, ?)
+               ON CONFLICT(partner_key, purpose_key) DO UPDATE SET
+                       category_id = excluded.category_id,
+                       match_count = learned_rules.match_count + 1,
+                       updated_at  = datetime('now')""",
+            (key[0], key[1], category_id),
+        )
+
+    matches = _matching_transactions(connection, key)
+    for tid, _applicant, _purpose, current in matches:
+        if current == category_id:
+            continue
+        connection.execute(
+            "UPDATE transactions SET category_id = ? WHERE id = ?", (category_id, tid)
+        )
+    # Rückgabe = Anzahl der Umsätze, die diese Kategorie jetzt tragen (nicht nur
+    # die geänderten) – so meldet das Frontend „auf N Umsätze angewandt".
+    return len(matches)
+
+
 def apply_categorization_to_db(
     db_path: Path,
     *,
