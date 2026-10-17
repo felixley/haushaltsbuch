@@ -98,12 +98,17 @@ def create_app() -> FastAPI:
 
     # --- Kennzahlen -------------------------------------------------
     @app.get("/api/kpis")
-    def kpis():
+    def kpis(account_id: str | None = None):
         month_start = dt.date.today().replace(day=1).isoformat()
+        where, params = "", []
+        if account_id:
+            where, params = " WHERE account_iban = ?", [account_id]
+        month_where = f"{where} AND booking_date >= ?" if where else " WHERE booking_date >= ?"
         with connect() as conn:
-            all_amounts = [r[0] for r in conn.execute("SELECT amount FROM transactions")]
+            all_amounts = [r[0] for r in conn.execute(
+                f"SELECT amount FROM transactions{where}", params)]
             month = [r[0] for r in conn.execute(
-                "SELECT amount FROM transactions WHERE booking_date >= ?", (month_start,))]
+                f"SELECT amount FROM transactions{month_where}", [*params, month_start])]
         total = sum(_money(a) for a in all_amounts)
         income = sum(_money(a) for a in month if _money(a) > 0)
         expenses = sum(_money(a) for a in month if _money(a) < 0)
@@ -116,11 +121,17 @@ def create_app() -> FastAPI:
         }
 
     @app.get("/api/timeline")
-    def timeline(granularity: str = Query("monthly", pattern="^(monthly|yearly)$")):
+    def timeline(
+        granularity: str = Query("monthly", pattern="^(monthly|yearly)$"),
+        account_id: str | None = None,
+    ):
         length = 7 if granularity == "monthly" else 4  # 'YYYY-MM' bzw. 'YYYY'
         agg: dict[str, dict[str, float]] = defaultdict(lambda: {"income": 0.0, "expenses": 0.0})
+        where, params = (" WHERE account_iban = ?", [account_id]) if account_id else ("", [])
         with connect() as conn:
-            rows = conn.execute("SELECT booking_date, amount FROM transactions").fetchall()
+            rows = conn.execute(
+                f"SELECT booking_date, amount FROM transactions{where}", params
+            ).fetchall()
         for booking_date, amount in rows:
             if not booking_date:
                 continue
@@ -136,12 +147,14 @@ def create_app() -> FastAPI:
         ]
 
     @app.get("/api/categories/breakdown")
-    def breakdown():
+    def breakdown(account_id: str | None = None):
         totals: dict[str, float] = defaultdict(float)
+        where, params = (" WHERE t.account_iban = ?", [account_id]) if account_id else ("", [])
         with connect() as conn:
             rows = conn.execute(
-                """SELECT COALESCE(c.name, 'Nicht zugeordnet') AS name, t.amount
-                   FROM transactions t LEFT JOIN categories c ON c.id = t.category_id"""
+                f"""SELECT COALESCE(c.name, 'Nicht zugeordnet') AS name, t.amount
+                    FROM transactions t LEFT JOIN categories c ON c.id = t.category_id{where}""",
+                params,
             ).fetchall()
         for name, amount in rows:
             b = _money(amount)

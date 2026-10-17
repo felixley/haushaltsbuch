@@ -34,8 +34,23 @@ async function api(path, opts) {
 
 const JSON_HEADERS = {"Content-Type": "application/json"};
 
+// Aktuell im Filter gewähltes Konto -> Query-Fragment für die Chart-Endpunkte.
+function accountQuery(prefix = "?") {
+  const acct = $("f-account").value;
+  return acct ? `${prefix}account_id=${encodeURIComponent(acct)}` : "";
+}
+
+function currentGranularity() {
+  return document.querySelector(".gran-btn.bg-blue-600")?.dataset.gran || "monthly";
+}
+
+// Konto-Filter wirkt auf Kennzahlen, Timeline und Kategorien-Grafik.
+async function loadCharts() {
+  await Promise.all([loadKpis(), loadTimeline(currentGranularity()), loadBreakdown()]);
+}
+
 async function loadKpis() {
-  const k = await api("/api/kpis");
+  const k = await api(`/api/kpis${accountQuery()}`);
   $("kpi-balance").textContent = fmtEUR(k.total_balance);
   $("kpi-income").textContent = fmtEUR(k.income_month);
   $("kpi-expenses").textContent = fmtEUR(k.expenses_month);
@@ -43,7 +58,7 @@ async function loadKpis() {
 }
 
 async function loadTimeline(granularity = "monthly") {
-  const data = await api(`/api/timeline?granularity=${granularity}`);
+  const data = await api(`/api/timeline?granularity=${granularity}${accountQuery("&")}`);
   const labels = data.map(d => d.period);
   const income = data.map(d => d.income);
   const expenses = data.map(d => Math.abs(d.expenses));
@@ -73,7 +88,7 @@ function palette(n) {
 }
 
 async function loadBreakdown() {
-  const data = await api("/api/categories/breakdown");
+  const data = await api(`/api/categories/breakdown${accountQuery()}`);
   const total = data.reduce((s, d) => s + d.total, 0);
   const labels = data.map(d => d.category);
   const values = data.map(d => d.total);
@@ -227,6 +242,13 @@ document.querySelectorAll(".gran-btn").forEach(b => b.addEventListener("click", 
   b.className = "gran-btn px-3 py-1 text-sm rounded bg-blue-600 text-white";
   loadTimeline(b.dataset.gran).catch(e => showError(e.message));
 }));
+
+// Kontowechsel aktualisiert Tabelle UND alle Grafiken – die Kennzahlen,
+// die Timeline und der Kategorien-Donut beziehen sich dann nur auf dieses Konto.
+$("f-account").addEventListener("change", () => {
+  page = 1;
+  Promise.all([loadCharts(), loadTransactions()]).catch(e => showError(e.message));
+});
 
 $("f-apply").addEventListener("click", () => { page = 1; loadTransactions().catch(e => showError(e.message)); });
 $("f-search").addEventListener("keydown", (e) => { if (e.key === "Enter") $("f-apply").click(); });
@@ -497,8 +519,7 @@ function initImageModal() {
 }
 
 function refreshData() {
-  loadKpis().catch(e => showError(e.message));
-  loadTimeline(document.querySelector(".gran-btn.bg-blue-600")?.dataset.gran || "monthly").catch(e => showError(e.message));
+  loadCharts().catch(e => showError(e.message));
   loadAccounts().catch(e => showError(e.message));
   refreshCategoriesAndData().catch(e => showError(e.message));
 }
