@@ -14,6 +14,7 @@ import datetime as dt
 import json
 import os
 import sqlite3
+import uuid
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from decimal import Decimal
@@ -30,8 +31,11 @@ from web.kategorien import (
     apply_rule_to_all_matches,
     count_other_matches,
     ensure_default_categories,
+    ensure_learned_rules_table,
     internal_transfer_category_ids,
     learn_from_manual_assignment,
+    match_key,
+    matching_transactions_snapshot,
 )
 from web.partner import clean_partner_name
 
@@ -127,8 +131,31 @@ def _exclude_internal_transfers(
     """
     if category_ids:
         placeholders = ", ".join("?" for _ in category_ids)
-        where.append(f"t.category_id NOT IN ({placeholders})")
+        # Klammern sind Pflicht: ohne sie würde die UND-Verknüpfung mit anderen
+        # Bedingungen falsch gruppiert. ``IS NULL`` muss ausdrücklich davor:
+        # ``NULL NOT IN (...)`` ergibt in SQL NULL (nicht TRUE) und würde
+        # Umsätze ohne Kategorie komplett aus den Auswertungen werfen.
+        where.append(
+            f"(t.category_id IS NULL OR t.category_id NOT IN ({placeholders}))"
+        )
         params.extend(category_ids)
+
+
+# Rückgängig-Puffer für Sammel-Zuordnungen: Token -> vorheriger Zustand.
+_undo_store: dict[str, dict] = {}
+_UNDO_LIMIT = 20
+
+
+def _remember_undo(
+    changed: list[tuple[int, int | None]],
+    rule: tuple[str, str, int | None],
+) -> str:
+    """Merkt sich den Zustand vor einer Sammel-Zuordnung für ``/undo``."""
+    token = uuid.uuid4().hex
+    _undo_store[token] = {"changes": changed, "rule": rule}
+    while len(_undo_store) > _UNDO_LIMIT:
+        _undo_store.pop(next(iter(_undo_store)))
+    return token
 
 
 # ------------------------------------------------------------------
@@ -311,15 +338,20 @@ def create_app() -> FastAPI:
 
     @app.patch("/api/transactions/{tx_id}/category")
     def set_category(tx_id: int, body: dict):
-        """Setzt die Kategorie eines Umsatzes und lernt daraus eine Regel.
+        """Setzt die Kategorie eines Umsatzes und überträgt sie auf gleichartige.
 
-        Ohne ``apply_to_all`` werden nur noch leere Zuordnungen mitgezogen
-        (manuelle Abweichungen bleiben erhalten). ``affected`` nennt vorab, wie
-        viele weitere Umsätze eine abweichende Kategorie haben – das Frontend
-        fragt daraufhin nach und schickt ``{"apply_to_all": true}``.
+        Standard: **alle** Umsätze mit gleichem Partner und Verwendungszweck
+        erhalten diese Kategorie – auch wenn sie schon eine andere hatten
+        (der Betrag ist dabei egal, gleichartige Umsätze unterscheiden sich oft
+        nur darin). ``overwritten`` nennt, wie viele vorhandene Zuordnungen
+        dabei ersetzt wurden; ``undo_token`` macht den Vorgang rückgängig.
+
+        Mit ``{"only_empty": true}`` werden nur noch leere Zuordnungen gefüllt
+        (bisheriges Verhalten von ``learn_from_manual_assignment``).
+        ``category_id: null`` hebt die Zuordnung auf und entfernt die Regel.
         """
         raw_cat = body.get("category_id")
-        apply_to_all = bool(body.get("apply_to_all"))
+        only_empty = bool(body.get("only_empty"))
         with connect() as conn:
             if conn.execute("SELECT 1 FROM transactions WHERE id = ?", (tx_id,)).fetchone() is None:
                 raise HTTPException(404, "Transaktion nicht gefunden")
@@ -331,16 +363,75 @@ def create_app() -> FastAPI:
                 if cat is None:
                     raise HTTPException(404, "Kategorie nicht gefunden")
                 cat_id, name = cat["id"], cat["name"]
-            if apply_to_all:
-                # Bestätigter Fall: ALLE Umsätze mit gleichem Partner +
-                # Verwendungszweck überschreiben, auch bereits zugeordnete.
-                updated = apply_rule_to_all_matches(conn, tx_id, cat_id)
-                affected = 0
-            else:
+
+            undo_token = None
+            overwritten = 0
+            if cat_id is None:
+                updated = learn_from_manual_assignment(conn, tx_id, None)
+            elif only_empty:
                 updated = learn_from_manual_assignment(conn, tx_id, cat_id)
-                affected = count_other_matches(conn, tx_id, cat_id)
+            else:
+                # Zustand VOR der Änderung festhalten (für "Rückgängig").
+                vorher = matching_transactions_snapshot(conn, tx_id)
+                zeile = conn.execute(
+                    "SELECT applicant_name, purpose FROM transactions WHERE id = ?", (tx_id,)
+                ).fetchone()
+                partner_key, purpose_key = match_key(zeile[0], zeile[1])
+                ensure_learned_rules_table(conn)
+                regel = conn.execute(
+                    "SELECT category_id FROM learned_rules WHERE partner_key = ? AND purpose_key = ?",
+                    (partner_key, purpose_key),
+                ).fetchone()
+                alt_regel = regel[0] if regel else None
+
+                updated = apply_rule_to_all_matches(conn, tx_id, cat_id)
+
+                changed = [(tid, alt) for tid, alt in vorher if alt != cat_id]
+                # Gezählt werden nur *andere* Umsätze – der gerade bearbeitete
+                # Umsatz wurde ja bewusst umgestellt.
+                overwritten = sum(
+                    1 for tid, alt in changed if alt is not None and tid != tx_id
+                )
+                if changed or alt_regel is not None:
+                    undo_token = _remember_undo(
+                        changed, (partner_key, purpose_key, alt_regel)
+                    )
             conn.commit()
-        return {"ok": True, "category": name, "updated": updated, "affected": affected}
+        return {
+            "ok": True, "category": name, "updated": updated,
+            "overwritten": overwritten, "undo_token": undo_token,
+        }
+
+    @app.post("/api/transactions/category/undo")
+    def undo_category(body: dict):
+        """Macht die letzte Sammel-Zuordnung rückgängig (per ``undo_token``)."""
+        changes = _undo_store.pop((body or {}).get("token"), None)
+        if changes is None:
+            raise HTTPException(404, "Nichts rückgängig zu machen")
+        with connect() as conn:
+            ensure_learned_rules_table(conn)
+            for tx_id, old_category in changes["changes"]:
+                conn.execute(
+                    "UPDATE transactions SET category_id = ? WHERE id = ?",
+                    (old_category, tx_id),
+                )
+            partner_key, purpose_key, old_rule = changes["rule"]
+            if old_rule is None:
+                conn.execute(
+                    "DELETE FROM learned_rules WHERE partner_key = ? AND purpose_key = ?",
+                    (partner_key, purpose_key),
+                )
+            else:
+                conn.execute(
+                    """INSERT INTO learned_rules (partner_key, purpose_key, category_id)
+                           VALUES (?, ?, ?)
+                       ON CONFLICT(partner_key, purpose_key) DO UPDATE SET
+                           category_id = excluded.category_id,
+                           updated_at = datetime('now')""",
+                    (partner_key, purpose_key, old_rule),
+                )
+            conn.commit()
+        return {"ok": True, "restored": len(changes["changes"])}
 
     # --- Automatische Kategorisierung -------------------------------
     @app.post("/api/categorize")

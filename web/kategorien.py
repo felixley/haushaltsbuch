@@ -50,6 +50,7 @@ __all__ = [
     "match_key",
     "suggest_category",
     "internal_transfer_category_ids",
+    "matching_transactions_snapshot",
 ]
 
 
@@ -492,6 +493,24 @@ def _matching_transactions(
         "SELECT id, applicant_name, purpose, category_id FROM transactions"
     ).fetchall()
     return [r for r in rows if match_key(r[1], r[2]) == key]
+
+
+def matching_transactions_snapshot(
+    connection: sqlite3.Connection, tx_id: int
+) -> list[tuple[int, int | None]]:
+    """Aktueller Zustand aller Umsätze mit gleichem Partner + Verwendungszweck.
+
+    Liefert ``(id, category_id)``-Paare – die Grundlage für das Rückgängigmachen
+    einer Sammel-Zuordnung. Der Betrag spielt bewusst keine Rolle: gleichartige
+    Umsätze unterscheiden sich oft nur im Betrag.
+    """
+    row = connection.execute(
+        "SELECT applicant_name, purpose FROM transactions WHERE id = ?", (tx_id,)
+    ).fetchone()
+    if row is None:
+        return []
+    key = match_key(row[0], row[1])
+    return [(tid, current) for tid, _a, _p, current in _matching_transactions(connection, key)]
 
 
 def count_other_matches(

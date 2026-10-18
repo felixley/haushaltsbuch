@@ -16,11 +16,25 @@ function showError(msg) {
   setTimeout(() => b.classList.add("hidden"), 5000);
 }
 
-function toast(msg) {
+let toastTimer = null;
+
+function toast(msg, action) {
   const b = $("error-banner");
-  b.textContent = msg;
+  b.textContent = "";
+  const text = document.createElement("span");
+  text.textContent = msg;
+  b.appendChild(text);
+  if (action) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = action.label;
+    btn.className = "ml-3 underline font-semibold";
+    btn.addEventListener("click", () => { b.classList.add("hidden"); action.onClick(); });
+    b.appendChild(btn);
+  }
   b.className = "fixed bottom-4 left-1/2 -translate-x-1/2 bg-green-600 text-white px-4 py-2 rounded-lg shadow";
-  setTimeout(() => b.classList.add("hidden"), 3000);
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => b.classList.add("hidden"), action ? 10000 : 3000);
 }
 
 async function api(path, opts) {
@@ -190,37 +204,35 @@ async function loadTransactions() {
       const txId = sel.dataset.tx;
       const catId = sel.value ? +sel.value : null;
       try {
-        let res = await api(`/api/transactions/${txId}/category`, {
+        // Standard des Backends: die Kategorie geht automatisch an ALLE Umsätze
+        // mit gleichem Partner und Verwendungszweck – auch bei anderem Betrag.
+        const res = await api(`/api/transactions/${txId}/category`, {
           method: "PATCH", headers: JSON_HEADERS,
           body: JSON.stringify({category_id: catId}),
         });
-        // Backend meldet, wie viele gleichartige Umsätze eine ABWEICHENDE
-        // Kategorie haben. Erst nach Bestätigung werden auch diese überschrieben.
-        if (catId && res.affected > 0) {
-          // Beide Knöpfe sind ausdrücklich beschriftet: Der Dialog entscheidet,
-          // ob auch Umsätze mit abweichender Kategorie übernommen werden.
-          const ok = await askConfirm(
-            `${res.affected} weitere Umsätze mit gleichem Empfänger und ` +
-            `Verwendungszweck haben eine andere Kategorie.`,
-            {okLabel: `Alle auf "${res.category}" setzen`, cancelLabel: "Nur diesen Umsatz"}
-          );
-          if (ok) {
-            res = await api(`/api/transactions/${txId}/category`, {
-              method: "PATCH", headers: JSON_HEADERS,
-              body: JSON.stringify({category_id: catId, apply_to_all: true}),
-            });
-            toast(`"${res.category}" auf ${res.updated} Umsätze angewandt`);
-          } else {
-            toast("Nur dieser Umsatz geändert");
-          }
+        if (!catId) {
+          toast("Zuordnung aufgehoben · Regel entfernt");
         } else {
-          const n = res.updated ?? 1;
-          toast(n > 1
-            ? `Kategorie gespeichert · auf ${n} Umsätze angewandt`
-            : "Kategorie gespeichert");
+          const parts = [`"${res.category}" auf ${res.updated} Umsätze angewandt`];
+          if (res.overwritten > 0) parts.push(`${res.overwritten} bestehende Zuordnung(en) ersetzt`);
+          const action = res.undo_token ? {
+            label: "Rückgängig",
+            onClick: async () => {
+              try {
+                const r = await api("/api/transactions/category/undo", {
+                  method: "POST", headers: JSON_HEADERS,
+                  body: JSON.stringify({token: res.undo_token}),
+                });
+                toast(`${r.restored} Umsätze zurückgesetzt`);
+                loadTransactions();
+                loadCharts();
+              } catch (e) { showError(e.message); }
+            },
+          } : undefined;
+          toast(parts.join(" · "), action);
         }
         loadTransactions();
-        loadBreakdown();
+        loadCharts();
       } catch (e) { showError(e.message); }
     });
   });

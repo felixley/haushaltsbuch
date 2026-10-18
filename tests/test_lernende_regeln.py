@@ -305,7 +305,7 @@ def test_apply_to_all_ist_idempotent(tmp_path) -> None:
 
 
 def test_api_apply_to_all(tmp_path, monkeypatch) -> None:
-    """PATCH liefert ``affected`` und überschreibt erst mit ``apply_to_all``."""
+    """PATCH überträgt die Kategorie auf alle gleichartigen Umsätze (Standard)."""
     db = tmp_path / "t.db"
     monkeypatch.setattr(webapp, "DB_PATH", db)
     _seed(db, [
@@ -317,31 +317,73 @@ def test_api_apply_to_all(tmp_path, monkeypatch) -> None:
     alt = _cat_id(db, "Steuererstattung")
 
     conn = sqlite3.connect(db)
+    # Alle drei sind bereits (falsch) vorkategorisiert – wie nach "Automatisch kategorisieren".
     conn.execute("UPDATE transactions SET category_id = ?", (alt,))
     conn.commit()
     conn.close()
 
     with TestClient(webapp.create_app()) as client:
-        # 1) Nur ein Umsatz, Rest bleibt -> affected meldet die 2 anderen
         r = client.patch("/api/transactions/1/category", json={"category_id": ziel})
         assert r.status_code == 200
-        assert r.json()["updated"] == 1
-        assert r.json()["affected"] == 2
-
-        cats = {i["id"]: i["category"] for i in client.get("/api/transactions").json()["items"]}
-        assert cats[1] == "Restaurants & Cafés"
-        assert cats[2] == "Steuererstattung"  # unangetastet
-
-        # 2) Bestätigt -> alle drei
-        r = client.patch(
-            "/api/transactions/1/category",
-            json={"category_id": ziel, "apply_to_all": True},
-        )
-        assert r.status_code == 200
-        assert r.json()["updated"] == 3
+        body = r.json()
+        assert body["updated"] == 3
+        assert body["overwritten"] == 2      # die beiden anderen Vorkategorisierungen
+        assert body["undo_token"]
 
         cats = {i["id"]: i["category"] for i in client.get("/api/transactions").json()["items"]}
         assert set(cats.values()) == {"Restaurants & Cafés"}
+
+
+def test_api_undo_macht_sammelzuordnung_rueckgaengig(tmp_path, monkeypatch) -> None:
+    """``undo_token`` stellt Kategorien und gelernte Regel wieder her."""
+    db = tmp_path / "t.db"
+    monkeypatch.setattr(webapp, "DB_PATH", db)
+    _seed(db, [
+        ("Restaurant Vapiano", "Restaurant Vapiano Zahlung", "-34.80", "h1"),
+        ("Restaurant Vapiano", "Restaurant Vapiano Zahlung", "-21.00", "h2"),
+    ])
+    ziel = _cat_id(db, "Restaurants & Cafés")
+    alt = _cat_id(db, "Steuererstattung")
+
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE transactions SET category_id = ? WHERE id = 2", (alt,))
+    conn.commit()
+    conn.close()
+
+    with TestClient(webapp.create_app()) as client:
+        token = client.patch(
+            "/api/transactions/1/category", json={"category_id": ziel}
+        ).json()["undo_token"]
+        assert {i["category"] for i in client.get("/api/transactions").json()["items"]} == {"Restaurants & Cafés"}
+
+        r = client.post("/api/transactions/category/undo", json={"token": token})
+        assert r.status_code == 200 and r.json()["restored"] == 2
+
+        cats = {i["id"]: i["category"] for i in client.get("/api/transactions").json()["items"]}
+        assert cats[1] is None                # war vorher leer
+        assert cats[2] == "Steuererstattung"  # vorherige Zuordnung wieder da
+        assert _learned_count(db) == 0        # Regel mit entfernt
+
+        # zweiter Aufruf: nichts mehr rückgängig zu machen
+        assert client.post("/api/transactions/category/undo", json={"token": token}).status_code == 404
+
+
+def test_gleicher_partner_und_zweck_mit_anderem_betrag(tmp_path, monkeypatch) -> None:
+    """Nur der Betrag unterscheidet sich -> Umsatz wird trotzdem mitgezogen."""
+    db = tmp_path / "t.db"
+    monkeypatch.setattr(webapp, "DB_PATH", db)
+    _seed(db, [
+        ("REWE", "KARTENZAHLUNG REWE SAG", "-23.10", "h1"),
+        ("REWE", "KARTENZAHLUNG REWE SAG", "-11.00", "h2"),
+    ])
+    ziel = _cat_id(db, "Haushalt & Drogerie")
+
+    with TestClient(webapp.create_app()) as client:
+        r = client.patch("/api/transactions/2/category", json={"category_id": ziel})
+        assert r.json()["updated"] == 2
+        cats = {i["id"]: i["category"] for i in client.get("/api/transactions").json()["items"]}
+        assert cats[1] == "Haushalt & Drogerie"
+        assert cats[2] == "Haushalt & Drogerie"
 
 
 def test_sync_pfad_nutzt_gelernte_regeln(tmp_path) -> None:

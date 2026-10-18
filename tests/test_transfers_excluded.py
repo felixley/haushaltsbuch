@@ -93,6 +93,32 @@ def test_konto_filter_bleibt_korrekt(client) -> None:
     assert a["expenses_month"] == -250.0
 
 
+def test_umsaetze_ohne_kategorie_zaehlen_weiterhin_mit(client) -> None:
+    """Regression: ``NULL NOT IN (...)`` ist in SQL NULL – die Zeile fiel raus."""
+    conn = sqlite3.connect(webapp.DB_PATH)
+    conn.execute(
+        """INSERT INTO transactions (account_iban, booking_date, amount, currency,
+               applicant_name, purpose, raw, dedup_hash, category_id)
+           VALUES (?, ?, '-42.00', 'EUR', 'Unbekannt', 'OHNE KATEGORIE', '{}', ?, NULL)""",
+        (A, MONAT, "ohne-kat-1"),
+    )
+    conn.commit()
+    conn.close()
+
+    k = client.get("/api/kpis").json()
+    assert k["total_balance"] == 1628.0        # 1670 aus dem Seed minus 42
+    assert k["expenses_month"] == -372.0       # -330 minus 42
+
+    timeline = client.get("/api/timeline").json()
+    assert timeline == [{"period": MONAT[:7], "income": 2000.0, "expenses": -372.0}]
+
+    breakdown = client.get("/api/categories/breakdown").json()
+    assert breakdown == [
+        {"category": "Lebensmittel", "total": 330.0},
+        {"category": "Nicht zugeordnet", "total": 42.0},
+    ]
+
+
 def test_suche_nach_transfer_liefert_leere_auswertung(client) -> None:
     k = client.get("/api/kpis", params={"search": "UEBERTRAG"}).json()
     assert k["total_balance"] == 0.0

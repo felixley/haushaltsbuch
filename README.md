@@ -202,11 +202,14 @@ Der Verwendungszweck wird von den Banken oft ohne Trennzeichen aneinandergehäng
   Gelernte Regeln haben Vorrang vor den eingebauten Regeln. Hebst du die
   Zuordnung wieder auf (*Nicht zugeordnet*), wird die gelernte Regel entfernt.
   Die Regeln liegen in der Tabelle `learned_rules` (siehe `schema.sql`).
-  Haben gleichartige Umsätze bereits eine **andere** Kategorie, fragt das
-  Dashboard nach, bevor diese überschrieben werden. Diese Rückfrage läuft über
-  einen eigenen Dialog (`#confirm-modal`), nicht über `window.confirm()` –
-  Chrome unterdrückt weitere native Dialoge nach wenigen Bestätigungen und
-  würde die Weitergabe sonst stillschweigend verhindern.
+  Haben gleichartige Umsätze bereits eine **andere** Kategorie, wird diese
+  ebenfalls überschrieben – der Dialog entfällt. Stattdessen meldet ein Toast,
+  auf wie viele Umsätze angewandt und wie viele bestehende Zuordnungen ersetzt
+  wurden, mit einem **Rückgängig**-Knopf (`POST /api/transactions/category/undo`
+  mit `undo_token`). Der Vorgang läuft so direkt durch und ist nicht von
+  Browser-Dialogen abhängig (`window.confirm()` wird von Chrome nach wenigen
+  Bestätigungen unterdrückt und lieferte dann still `false`).
+  Sollen nur *leere* Zuordnungen gefüllt werden: `{"only_empty": true}`.
 
 Vorhandene Umsätze einmalig zuordnen:
 
