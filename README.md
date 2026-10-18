@@ -202,6 +202,11 @@ Der Verwendungszweck wird von den Banken oft ohne Trennzeichen aneinandergehäng
   Gelernte Regeln haben Vorrang vor den eingebauten Regeln. Hebst du die
   Zuordnung wieder auf (*Nicht zugeordnet*), wird die gelernte Regel entfernt.
   Die Regeln liegen in der Tabelle `learned_rules` (siehe `schema.sql`).
+  Haben gleichartige Umsätze bereits eine **andere** Kategorie, fragt das
+  Dashboard nach, bevor diese überschrieben werden. Diese Rückfrage läuft über
+  einen eigenen Dialog (`#confirm-modal`), nicht über `window.confirm()` –
+  Chrome unterdrückt weitere native Dialoge nach wenigen Bestätigungen und
+  würde die Weitergabe sonst stillschweigend verhindern.
 
 Vorhandene Umsätze einmalig zuordnen:
 

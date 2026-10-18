@@ -34,6 +34,39 @@ async function api(path, opts) {
 
 const JSON_HEADERS = {"Content-Type": "application/json"};
 
+// Eigener Bestätigungsdialog statt window.confirm(): Chrome zeigt nach wenigen
+// nativen Dialogen „Diese Seite daran hindern, weitere Dialoge zu erstellen“.
+// Wird das angehakt, liefert confirm() stillschweigend false und die Zuordnung
+// auf gleichartige Umsätze unterbliebe ohne sichtbare Rückmeldung.
+function askConfirm(message, {okLabel = "OK", cancelLabel = "Abbrechen"} = {}) {
+  return new Promise((resolve) => {
+    const modal = $("confirm-modal");
+    if (!modal) return resolve(window.confirm(message));  // Fallback
+    $("confirm-text").textContent = message;
+    const ok = $("confirm-ok");
+    const cancel = $("confirm-cancel");
+    ok.textContent = okLabel;
+    cancel.textContent = cancelLabel;
+
+    const finish = (value) => {
+      modal.classList.add("hidden");
+      document.body.style.overflow = "";
+      ok.onclick = cancel.onclick = null;
+      document.removeEventListener("keydown", onKey);
+      resolve(value);
+    };
+    const onKey = (e) => { if (e.key === "Escape") finish(false); };
+
+    ok.onclick = () => finish(true);
+    cancel.onclick = () => finish(false);
+    $("confirm-backdrop").onclick = () => finish(false);
+    document.addEventListener("keydown", onKey);
+    modal.classList.remove("hidden");
+    document.body.style.overflow = "hidden";
+    ok.focus();
+  });
+}
+
 // Alle Filter der Leiste unten als Query-Parameter. Kennzahlen, Timeline und
 // Kategorien-Grafik nutzen exakt dieselben Filter wie die Umsatztabelle.
 function filterParams() {
@@ -164,10 +197,12 @@ async function loadTransactions() {
         // Backend meldet, wie viele gleichartige Umsätze eine ABWEICHENDE
         // Kategorie haben. Erst nach Bestätigung werden auch diese überschrieben.
         if (catId && res.affected > 0) {
-          const ok = confirm(
+          // Beide Knöpfe sind ausdrücklich beschriftet: Der Dialog entscheidet,
+          // ob auch Umsätze mit abweichender Kategorie übernommen werden.
+          const ok = await askConfirm(
             `${res.affected} weitere Umsätze mit gleichem Empfänger und ` +
-            `Verwendungszweck haben eine andere Kategorie.\n\n` +
-            `Auch auf "${res.category}" setzen?`
+            `Verwendungszweck haben eine andere Kategorie.`,
+            {okLabel: `Alle auf "${res.category}" setzen`, cancelLabel: "Nur diesen Umsatz"}
           );
           if (ok) {
             res = await api(`/api/transactions/${txId}/category`, {
@@ -204,7 +239,8 @@ async function loadCategories() {
     `<li class="flex justify-between py-1"><span>${escapeHtml(c.name)} <span class="text-slate-400 text-xs">${c.type === "income" ? "Einnahme" : "Ausgabe"}</span></span>
      <button data-id="${c.id}" class="del-cat text-red-500 text-xs">✕</button></li>`).join("");
   ul.querySelectorAll(".del-cat").forEach(b => b.addEventListener("click", async () => {
-    if (!confirm("Kategorie löschen? Zugeordnete Umsätze werden 'Nicht zugeordnet'.")) return;
+    if (!await askConfirm("Kategorie löschen? Zugeordnete Umsätze werden 'Nicht zugeordnet'.",
+                          {okLabel: "Löschen"})) return;
     try {
       await api(`/api/categories/${b.dataset.id}`, {method: "DELETE"});
       await refreshCategoriesAndData();

@@ -140,6 +140,21 @@
   </div>
 </div>
 
+<!-- Bestätigungsdialog (ersetzt window.confirm: Chrome unterdrückt weitere
+     native Dialoge nach mehreren Bestätigungen, dann liefe die Zuordnung ins Leere) -->
+<div id="confirm-modal" class="hidden fixed inset-0 z-50">
+  <div id="confirm-backdrop" class="absolute inset-0 bg-black/40"></div>
+  <div class="absolute inset-0 flex items-center justify-center p-4">
+    <div class="relative bg-white rounded-xl shadow-2xl w-full max-w-lg p-4">
+      <p id="confirm-text" class="text-sm text-slate-700 whitespace-pre-line"></p>
+      <div class="flex flex-wrap justify-end gap-2 mt-4">
+        <button id="confirm-cancel" type="button" class="px-4 py-2 border rounded text-sm">Abbrechen</button>
+        <button id="confirm-ok" type="button" class="px-4 py-2 bg-blue-600 text-white rounded text-sm">OK</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div id="error-banner" class="hidden fixed bottom-4 left-1/2 -translate-x-1/2 bg-red-600 text-white px-4 py-2 rounded-lg shadow"></div>
 <script src="/static/main.js"></script>
 </body>
