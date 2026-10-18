@@ -121,6 +121,9 @@ def _where_clause(where: list[str]) -> str:
     return (" WHERE " + " AND ".join(where)) if where else ""
 
 
+APP_VERSION = "4"
+
+
 def _exclude_internal_transfers(
     where: list[str], params: list[object], category_ids: list[int]
 ) -> None:
@@ -336,6 +339,66 @@ def create_app() -> FastAPI:
         ]
         return {"total": total, "page": page, "per_page": per_page, "items": items}
 
+    # --- Diagnose ---------------------------------------------------
+    @app.get("/api/info")
+    def info():
+        """Selbstauskunft: Welcher Code/Datenbank liefert diese Antworten?"""
+        with connect() as conn:
+            txs = conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
+            offen = conn.execute(
+                "SELECT COUNT(*) FROM transactions WHERE category_id IS NULL"
+            ).fetchone()[0]
+            cats = conn.execute("SELECT COUNT(*) FROM categories").fetchone()[0]
+        return {
+            "app_version": APP_VERSION,
+            "db_path": str(DB_PATH),
+            "db_exists": Path(DB_PATH).exists(),
+            "transactions": txs,
+            "uncategorized": offen,
+            "categories": cats,
+        }
+
+    @app.get("/api/transactions/{tx_id}/matches")
+    def transaction_matches(tx_id: int):
+        """Zeigt, welche Umsätze als gleichartig gelten (Grundlage der Weitergabe).
+
+        Kriterium ist ausschließlich Partner (``applicant_name``, ohne IBAN) +
+        Verwendungszweck (``purpose``) – normalisiert auf Klein-
+        schreibung/Leerzeichen. Der **Betrag spielt keine Rolle**.
+        """
+        with connect() as conn:
+            row = conn.execute(
+                "SELECT applicant_name, purpose FROM transactions WHERE id = ?", (tx_id,)
+            ).fetchone()
+            if row is None:
+                raise HTTPException(404, "Transaktion nicht gefunden")
+            partner_key, purpose_key = match_key(row[0], row[1])
+            matches = matching_transactions_snapshot(conn, tx_id)
+            items = []
+            for tid, _current in matches:
+                r = conn.execute(
+                    """SELECT t.id, t.booking_date, t.amount, t.applicant_name,
+                              t.purpose, t.category_id, c.name AS category
+                         FROM transactions t
+                         LEFT JOIN categories c ON c.id = t.category_id
+                        WHERE t.id = ?""", (tid,),
+                ).fetchone()
+                items.append({
+                    "id": r["id"],
+                    "buchungsdatum": r["booking_date"],
+                    "betrag": _money(r["amount"]),
+                    "partner": r["applicant_name"],
+                    "verwendungszweck": r["purpose"],
+                    "category_id": r["category_id"],
+                    "category": r["category"],
+                })
+        return {
+            "tx_id": tx_id,
+            "kriterium": {"partner_key": partner_key, "purpose_key": purpose_key},
+            "count": len(matches),
+            "items": items,
+        }
+
     @app.patch("/api/transactions/{tx_id}/category")
     def set_category(tx_id: int, body: dict):
         """Setzt die Kategorie eines Umsatzes und überträgt sie auf gleichartige.
@@ -366,6 +429,7 @@ def create_app() -> FastAPI:
 
             undo_token = None
             overwritten = 0
+            total_matches = 1
             if cat_id is None:
                 updated = learn_from_manual_assignment(conn, tx_id, None)
             elif only_empty:
@@ -373,6 +437,7 @@ def create_app() -> FastAPI:
             else:
                 # Zustand VOR der Änderung festhalten (für "Rückgängig").
                 vorher = matching_transactions_snapshot(conn, tx_id)
+                total_matches = len(vorher)
                 zeile = conn.execute(
                     "SELECT applicant_name, purpose FROM transactions WHERE id = ?", (tx_id,)
                 ).fetchone()
@@ -384,9 +449,10 @@ def create_app() -> FastAPI:
                 ).fetchone()
                 alt_regel = regel[0] if regel else None
 
-                updated = apply_rule_to_all_matches(conn, tx_id, cat_id)
+                apply_rule_to_all_matches(conn, tx_id, cat_id)
 
                 changed = [(tid, alt) for tid, alt in vorher if alt != cat_id]
+                updated = len(changed)
                 # Gezählt werden nur *andere* Umsätze – der gerade bearbeitete
                 # Umsatz wurde ja bewusst umgestellt.
                 overwritten = sum(
@@ -397,9 +463,14 @@ def create_app() -> FastAPI:
                         changed, (partner_key, purpose_key, alt_regel)
                     )
             conn.commit()
+            # Rück-Leseprüfung nach dem Commit: haben wirklich alle Treffer die
+            # Kategorie? Damit fällt auf, wenn ein Schreibvorgang nicht greift
+            # (falsche DB, anderer Prozess, Read-only-Datei).
+            nachher = matching_transactions_snapshot(conn, tx_id)
+            verified = sum(1 for _tid, cur in nachher if cur == cat_id)
         return {
-            "ok": True, "category": name, "updated": updated,
-            "overwritten": overwritten, "undo_token": undo_token,
+            "ok": True, "category": name, "updated": updated, "total": total_matches,
+            "overwritten": overwritten, "verified": verified, "undo_token": undo_token,
         }
 
     @app.post("/api/transactions/category/undo")

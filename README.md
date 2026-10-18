@@ -211,6 +211,21 @@ Der Verwendungszweck wird von den Banken oft ohne Trennzeichen aneinandergehäng
   Bestätigungen unterdrückt und lieferte dann still `false`).
   Sollen nur *leere* Zuordnungen gefüllt werden: `{"only_empty": true}`.
 
+**Diagnose im laufenden Betrieb** (hilft bei „im Container geht es nicht“):
+
+```bash
+curl -s http://127.0.0.1:4711/api/info
+# -> app_version, db_path, Anzahl Umsätze/Kategorien, davon ohne Kategorie
+
+curl -s http://127.0.0.1:4711/api/transactions/<id>/matches
+# -> Kriterium (partner_key/purpose_key) und alle als gleichartig erkannten Umsätze
+```
+
+`/api/info` verrät den tatsächlich laufenden Code (`app_version`) und die
+benutzte Datenbank – so lässt sich unterscheiden, ob ein alter Server-Prozess
+oder ein Browser-Cache das Problem ist. Die Version steht auch im Dashboard
+oben rechts.
+
 Vorhandene Umsätze einmalig zuordnen:
 
 ```bash

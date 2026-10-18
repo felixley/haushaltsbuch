@@ -213,8 +213,14 @@ async function loadTransactions() {
         if (!catId) {
           toast("Zuordnung aufgehoben · Regel entfernt");
         } else {
-          const parts = [`"${res.category}" auf ${res.updated} Umsätze angewandt`];
+          // Ehrliche Meldung: `updated` = tatsächlich geänderte Zeilen,
+          // `verified` = nach dem Schreiben zurückgelesene Treffer.
+          const parts = [`"${res.category}": ${res.total ?? res.updated} Treffer`];
+          if (res.updated !== res.total) parts.push(`${res.updated} geändert`);
           if (res.overwritten > 0) parts.push(`${res.overwritten} bestehende Zuordnung(en) ersetzt`);
+          if (res.verified !== res.total) {
+            parts.push(`⚠ nur ${res.verified} in der Datenbank angekommen`);
+          }
           const action = res.undo_token ? {
             label: "Rückgängig",
             onClick: async () => {
@@ -586,8 +592,23 @@ function initImageModal() {
   document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeImageModal(); });
 }
 
+async function loadInfo() {
+  // Zeigt die Backend-Version an: So ist sofort erkennbar, welcher Stand im
+  // Container wirklich läuft (Frontend-Cache vs. nicht neu gestarteter Server).
+  try {
+    const info = await api("/api/info");
+    $("app-version").textContent =
+      `Backend v${info.app_version} · ${info.transactions} Umsätze` +
+      (info.uncategorized ? `, ${info.uncategorized} ohne Kategorie` : "");
+    $("app-version").title = `DB: ${info.db_path}`;
+  } catch (e) {
+    $("app-version").textContent = "Backend nicht erreichbar";
+  }
+}
+
 function refreshData() {
   loadCharts().catch(e => showError(e.message));
+  loadInfo().catch(() => {});
   loadAccounts().catch(e => showError(e.message));
   refreshCategoriesAndData().catch(e => showError(e.message));
 }
@@ -595,7 +616,7 @@ function refreshData() {
 async function init() {
   initImageModal();
   try {
-    await Promise.all([loadKpis(), loadTimeline("monthly"), loadAccounts(), loadSyncBanks()]);
+    await Promise.all([loadKpis(), loadTimeline("monthly"), loadAccounts(), loadSyncBanks(), loadInfo()]);
     await refreshCategoriesAndData();
   } catch (e) { showError(e.message); }
 }

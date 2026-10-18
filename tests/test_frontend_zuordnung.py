@@ -30,8 +30,11 @@ def test_kategorie_zuordnung_ohne_nativen_dialog() -> None:
     assert "res.affected" not in code      # Rückfrage-Pfad ist entfallen
 
 
-def test_zuordnung_wird_direkt_weitergemeldet() -> None:
-    assert "auf ${res.updated} Umsätze angewandt" in JS
+def test_zuordnung_meldet_treffer_und_aenderungen() -> None:
+    # Ehrliche Meldung: Treffer, tatsächlich geänderte Zeilen und Rückleseprüfung.
+    assert "Treffer" in JS
+    assert "res.updated" in JS and "res.total" in JS
+    assert "in der Datenbank angekommen" in JS
     assert "overwritten" in JS
 
 
@@ -50,6 +53,7 @@ def test_dialog_fuer_kategorie_loeschen_bleibt_verfuegbar() -> None:
 
 
 def test_frontend_version_ist_sichtbar_und_cache_busted() -> None:
-    """Sichtbare Version + Query-Parameter, damit ein alter Cache auffällt."""
+    """Sichtbare Version (aus /api/info) + Query-Parameter gegen Cache-Probleme."""
     assert 'id="app-version"' in HTML
     assert 'src="/static/main.js?v=' in HTML
+    assert "/api/info" in JS

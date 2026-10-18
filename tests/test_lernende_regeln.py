@@ -386,6 +386,59 @@ def test_gleicher_partner_und_zweck_mit_anderem_betrag(tmp_path, monkeypatch) ->
         assert cats[2] == "Haushalt & Drogerie"
 
 
+def test_updated_zaehlt_nur_echte_aenderungen(tmp_path, monkeypatch) -> None:
+    """Die gemeldete Zahl ist die der tatsächlich geänderten Zeilen."""
+    db = tmp_path / "t.db"
+    monkeypatch.setattr(webapp, "DB_PATH", db)
+    _seed(db, [
+        ("REWE", "KARTENZAHLUNG REWE SAG", "-23.10", "h1"),
+        ("REWE", "KARTENZAHLUNG REWE SAG", "-11.00", "h2"),
+        ("REWE", "KARTENZAHLUNG REWE SAG", "-5.00", "h3"),
+    ])
+    ziel = _cat_id(db, "Haushalt & Drogerie")
+
+    with TestClient(webapp.create_app()) as client:
+        erst = client.patch("/api/transactions/1/category", json={"category_id": ziel}).json()
+        assert (erst["total"], erst["updated"], erst["verified"]) == (3, 3, 3)
+
+        # Zweiter Aufruf: alles hat die Kategorie schon -> keine Änderung,
+        # aber weiterhin 3 Treffer (das war früher irreführend als "angewandt").
+        nochmal = client.patch("/api/transactions/1/category", json={"category_id": ziel}).json()
+        assert (nochmal["total"], nochmal["updated"], nochmal["verified"]) == (3, 0, 3)
+
+
+def test_matches_endpunkt_zeigt_kriterien(tmp_path, monkeypatch) -> None:
+    """Der Diagnose-Endpunkt nennt Kriterium und alle gleichartigen Umsätze."""
+    db = tmp_path / "t.db"
+    monkeypatch.setattr(webapp, "DB_PATH", db)
+    _seed(db, [
+        ("DE03760300800870717444FELIX LEY", "UEBERTRAG / UEBERWEISUNG", "-750.00", "h1"),
+        ("Felix Ley", "UEBERTRAG  /  UEBERWEISUNG", "-100.00", "h2"),   # nur Betrag/Format anders
+        ("ALDI", "EINKAUF", "-20.00", "h3"),                            # anderer Partner -> kein Treffer
+    ])
+
+    with TestClient(webapp.create_app()) as client:
+        body = client.get("/api/transactions/1/matches").json()
+        assert body["count"] == 2
+        assert body["kriterium"]["partner_key"] == "felix ley"
+        assert {i["id"] for i in body["items"]} == {1, 2}
+        assert {i["betrag"] for i in body["items"]} == {-750.0, -100.0}
+
+
+def test_info_endpunkt_meldet_version_und_datenbank(tmp_path, monkeypatch) -> None:
+    db = tmp_path / "t.db"
+    monkeypatch.setattr(webapp, "DB_PATH", db)
+    _seed(db, [("REWE", "KARTENZAHLUNG REWE SAG", "-23.10", "h1")])
+
+    with TestClient(webapp.create_app()) as client:
+        info = client.get("/api/info").json()
+    assert info["app_version"] == webapp.APP_VERSION
+    assert info["db_path"] == str(db)
+    assert info["db_exists"] is True
+    assert info["transactions"] == 1
+    assert info["uncategorized"] == 1      # der Seed-Umsatz ist ohne Kategorie
+
+
 def test_sync_pfad_nutzt_gelernte_regeln(tmp_path) -> None:
     """Auch der Bankabruf (web/sync.py) übernimmt gelernte Regeln."""
     from web import sync
