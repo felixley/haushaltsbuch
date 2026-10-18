@@ -173,6 +173,15 @@ Der Verwendungszweck wird von den Banken oft ohne Trennzeichen aneinandergehäng
 (z. B. `...UBERWEISUNGMIETE`); die Muster suchen deshalb per Teilstring, nicht
 über Wortgrenzen.
 
+**Vergleichsschlüssel für gelernte Regeln** (`match_key`): Partner ohne
+IBAN-Reste + Verwendungszweck, jeweils klein geschrieben, Mehrfach-Leerzeichen
+zusammengefasst und **Zahlen durch `#` ersetzt**. Banken schreiben Datum,
+Karten- oder Rechnungsnummern in den Zweck (`VISA Debitkartenumsatz vom
+10.10.2026`, `Rechnung 4711`) – ohne diesen Schritt gälten zwei Umsätze desselben
+Musters nie als gleichartig. Der **Betrag** spielt für die Gruppierung keine
+Rolle. Beim Start werden gespeicherte Regel-Schlüssel automatisch auf diese
+Normalisierung gehoben (`migrate_learned_rule_keys`, idempotent).
+
 - **Vorschlagskategorien:** Beim Start des Dashboards bzw. bei
   `transaktionen_speichern.py` werden gängige deutsche Kategorien angelegt
   (idempotent, vorhandene bleiben unverändert): u. a. Lebensmittel,

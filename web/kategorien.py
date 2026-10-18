@@ -51,6 +51,7 @@ __all__ = [
     "suggest_category",
     "internal_transfer_category_ids",
     "matching_transactions_snapshot",
+    "migrate_learned_rule_keys",
 ]
 
 
@@ -361,17 +362,80 @@ def ensure_learned_rules_table(connection: sqlite3.Connection) -> None:
     connection.executescript(_LEARNED_RULES_DDL)
 
 
+# Zahlen im Verwendungszweck sind für die Gruppierung unerheblich: Datum,
+# Rechnungs-, Karten- oder Referenznummern unterscheiden sich zwischen zwei
+# Umsätzen desselben Musters („VISA Debitkartenumsatz vom 10.10.2026" vs.
+# „… vom 11.10.2026", „Rechnung 4711" vs. „Rechnung 4712"). Alle Zahlenfolgen
+# werden deshalb durch ``#`` ersetzt; verglichen wird das Muster.
+_NUMBERS_RE = re.compile(r"\d+")
+
+# Platzhalter der früheren (nur zwischenzeitlich verwendeten) Datums-Variante,
+# damit alte Regeln nach der Migration wieder greifen.
+_OLD_DATE_PLACEHOLDER = "#datum"
+
+
+def _collapse_numbers(text: str) -> str:
+    """Ersetzt Zahlenfolgen durch ``#`` (Datum, Rechnung, Karte, Referenz)."""
+    return _NUMBERS_RE.sub("#", text.replace(_OLD_DATE_PLACEHOLDER, "#"))
+
+
 def match_key(applicant_name: str | None, purpose: str | None) -> tuple[str, str]:
     """Bildet den Vergleichsschlüssel ``(Partner, Verwendungszweck)``.
 
     Der Partner wird von IBAN-Resten befreit (siehe ``web.partner``) und
-    zusammen mit dem Verwendungszweck auf Kleinschreibung sowie einfache
-    Leerzeichen normalisiert. Dadurch treffen auch Umsätze zusammen, bei
-    denen die Bank die IBAN mal voranstellt und mal nicht.
+    zusammen mit dem Verwendungszweck auf Kleinschreibung, einfache Leerzeichen
+    und **Zahlen-Ersatz** (``#``) normalisiert. Dadurch treffen auch Umsätze
+    zusammen, bei denen die Bank die IBAN voranstellt oder Datum/Nummern in den
+    Zweck schreibt („… vom 10.10.2026" == „… vom 11.10.2026").
     """
-    partner = " ".join(clean_partner_name(applicant_name or "").split()).casefold()
-    zweck = " ".join((purpose or "").split()).casefold()
+    partner = _collapse_numbers(
+        " ".join(clean_partner_name(applicant_name or "").split()).casefold()
+    )
+    zweck = _collapse_numbers(" ".join((purpose or "").split()).casefold())
     return partner, zweck
+
+
+def migrate_learned_rule_keys(connection: sqlite3.Connection) -> int:
+    """Bringt gespeicherte Regel-Schlüssel auf die aktuelle Normalisierung.
+
+    Früher wurden Zahlen im Verwendungszweck mit verglichen – eine Regel zu
+    „visa debitkartenumsatz vom 10.10.2026" traf den Umsatz vom 11.10. nicht
+    und eine Regel zu „rechnung 4711" nicht die zu 4712. Die vorhandenen
+    Schlüssel werden deshalb umgeschrieben; kollidieren dabei zwei Regeln,
+    werden sie zusammengeführt (``match_count`` summiert, eine vorhandene
+    Kategorie bleibt).
+
+    Idempotent – nach dem ersten Lauf ändert sich nichts mehr.
+    """
+    ensure_learned_rules_table(connection)
+    rows = connection.execute(
+        "SELECT id, partner_key, purpose_key, category_id, match_count FROM learned_rules"
+    ).fetchall()
+    changed = 0
+    for rid, partner_key, purpose_key, category_id, match_count in rows:
+        neu = (_collapse_numbers(partner_key), _collapse_numbers(purpose_key))
+        if neu == (partner_key, purpose_key):
+            continue
+        existing = connection.execute(
+            "SELECT id FROM learned_rules WHERE partner_key = ? AND purpose_key = ?", neu
+        ).fetchone()
+        if existing and existing[0] != rid:
+            connection.execute(
+                """UPDATE learned_rules
+                      SET match_count = match_count + ?,
+                          category_id = COALESCE(category_id, ?),
+                          updated_at = datetime('now')
+                    WHERE id = ?""",
+                (match_count, category_id, existing[0]),
+            )
+            connection.execute("DELETE FROM learned_rules WHERE id = ?", (rid,))
+        else:
+            connection.execute(
+                "UPDATE learned_rules SET partner_key = ?, purpose_key = ? WHERE id = ?",
+                (*neu, rid),
+            )
+        changed += 1
+    return changed
 
 
 def load_learned_rules(connection: sqlite3.Connection) -> dict[tuple[str, str], str]:

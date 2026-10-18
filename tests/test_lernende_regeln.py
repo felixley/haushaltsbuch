@@ -13,6 +13,7 @@ import sqlite3
 from fastapi.testclient import TestClient
 
 import web.app as webapp
+import web.kategorien as kat
 from web.kategorien import (
     apply_categorization_to_db,
     apply_rule_to_all_matches,
@@ -405,6 +406,93 @@ def test_updated_zaehlt_nur_echte_aenderungen(tmp_path, monkeypatch) -> None:
         # aber weiterhin 3 Treffer (das war früher irreführend als "angewandt").
         nochmal = client.patch("/api/transactions/1/category", json={"category_id": ziel}).json()
         assert (nochmal["total"], nochmal["updated"], nochmal["verified"]) == (3, 0, 3)
+
+
+def test_zahlen_im_zweck_verhindern_treffer_nicht(tmp_path, monkeypatch) -> None:
+    """Datum/Nummern im Verwendungszweck (Bankzusatz) dürfen nicht trennen."""
+    db = tmp_path / "t.db"
+    monkeypatch.setattr(webapp, "DB_PATH", db)
+    _seed(db, [
+        ("CARREFOUR.ETTERB/ETTERBEEK", "VISA Debitkartenumsatz vom 10.10.2026", "-1.98", "c1"),
+        ("CARREFOUR.ETTERB/ETTERBEEK", "VISA Debitkartenumsatz vom 11.10.2026", "-16.70", "c2"),
+    ])
+    ziel = _cat_id(db, "Haushalt & Drogerie")
+
+    with TestClient(webapp.create_app()) as client:
+        m = client.get("/api/transactions/1/matches").json()
+        assert m["count"] == 2                      # trotz abweichendem Datum
+        assert m["kriterium"]["purpose_key"] == "visa debitkartenumsatz vom #.#.#"
+
+        res = client.patch("/api/transactions/1/category", json={"category_id": ziel}).json()
+        assert (res["total"], res["updated"], res["verified"]) == (2, 2, 2)
+        cats = {i["id"]: i["category"] for i in client.get("/api/transactions").json()["items"]}
+        assert cats[2] == "Haushalt & Drogerie"
+
+
+def test_alle_zahlenformen_werden_neutralisiert() -> None:
+    assert kat.match_key("Shop", "Bestellung 2026-10-12")[1] == "bestellung #-#-#"
+    assert kat.match_key("Shop", "Zahlung 03.11.26")[1] == "zahlung #.#.#"
+    assert kat.match_key("Shop", "Rechnung Nr. 4711")[1] == "rechnung nr. #"
+
+
+def test_rechnungsnummern_trennen_nicht_mehr(tmp_path, monkeypatch) -> None:
+    """Zahlen generell raus: verschiedene Rechnungsnummern gelten als gleichartig."""
+    db = tmp_path / "t.db"
+    monkeypatch.setattr(webapp, "DB_PATH", db)
+    _seed(db, [
+        ("Versicherung AG", "Beitrag Rechnung 4711", "-99.00", "r1"),
+        ("Versicherung AG", "Beitrag Rechnung 4712", "-99.00", "r2"),
+    ])
+
+    with TestClient(webapp.create_app()) as client:
+        m = client.get("/api/transactions/1/matches").json()
+    assert m["count"] == 2
+    assert m["kriterium"]["purpose_key"] == "beitrag rechnung #"
+
+
+def test_unterschiedlicher_partner_bleibt_getrennt(tmp_path, monkeypatch) -> None:
+    """Zahlen-Ersatz darf nicht zu weit gehen: anderer Partner bleibt getrennt."""
+    db = tmp_path / "t.db"
+    monkeypatch.setattr(webapp, "DB_PATH", db)
+    _seed(db, [
+        ("CARREFOUR.ETTERB/ETTERBEEK", "Kartenzahlung 10.10.2026", "-1.98", "c1"),
+        ("ALDI SUED", "Kartenzahlung 11.10.2026", "-16.70", "c2"),
+    ])
+    ziel = _cat_id(db, "Haushalt & Drogerie")
+
+    with TestClient(webapp.create_app()) as client:
+        m = client.get("/api/transactions/1/matches").json()
+        assert m["count"] == 1
+        assert m["kriterium"]["purpose_key"] == "kartenzahlung #.#.#"
+
+
+def test_regel_schluessel_werden_migriert(tmp_path, monkeypatch) -> None:
+    """Alte Regeln (ohne Zahlen-Ersatz) greifen nach der Migration weiter."""
+    import web.kategorien as kat
+
+    db = tmp_path / "t.db"
+    monkeypatch.setattr(webapp, "DB_PATH", db)
+    _seed(db, [("CARREFOUR.ETTERB/ETTERBEEK", "VISA Debitkartenumsatz vom 12.10.2026", "-9.99", "c1")])
+    ziel = _cat_id(db, "Haushalt & Drogerie")
+
+    conn = sqlite3.connect(db)
+    kat.ensure_learned_rules_table(conn)
+    conn.execute(
+        "INSERT INTO learned_rules (partner_key, purpose_key, category_id, match_count)"
+        " VALUES (?, ?, ?, 3)",   # Zustand vor der Umstellung
+        ("carrefour.etterb/etterbeek", "visa debitkartenumsatz vom 10.10.2026", ziel),
+    )
+    conn.commit()
+    assert kat.migrate_learned_rule_keys(conn) == 1
+    conn.commit()
+    key = kat.match_key("CARREFOUR.ETTERB/ETTERBEEK", "VISA Debitkartenumsatz vom 12.10.2026")
+    regeln = kat.load_learned_rules(conn)
+    conn.close()
+    assert key in regeln and regeln[key] == "Haushalt & Drogerie"
+    # zweiter Lauf ändert nichts mehr (idempotent)
+    conn = sqlite3.connect(db)
+    assert kat.migrate_learned_rule_keys(conn) == 0
+    conn.close()
 
 
 def test_matches_endpunkt_zeigt_kriterien(tmp_path, monkeypatch) -> None:

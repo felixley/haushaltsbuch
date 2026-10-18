@@ -36,6 +36,7 @@ from web.kategorien import (
     learn_from_manual_assignment,
     match_key,
     matching_transactions_snapshot,
+    migrate_learned_rule_keys,
 )
 from web.partner import clean_partner_name
 
@@ -71,6 +72,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     # Vorschlagskategorien anlegen (idempotent) – damit das Dashboard direkt
     # Auswahlmöglichkeiten hat, auch ohne manuelles Kategorisieren.
     ensure_default_categories(conn)
+    # Frühere Regel-Schlüssel auf die aktuelle Normalisierung bringen
+    # (idempotent) – sonst greifen gelernte Regeln nach dem Update nicht mehr.
+    migrate_learned_rule_keys(conn)
     conn.commit()
 
 
@@ -121,7 +125,7 @@ def _where_clause(where: list[str]) -> str:
     return (" WHERE " + " AND ".join(where)) if where else ""
 
 
-APP_VERSION = "4"
+APP_VERSION = "5"
 
 
 def _exclude_internal_transfers(

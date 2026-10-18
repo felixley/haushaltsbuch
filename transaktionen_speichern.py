@@ -38,6 +38,7 @@ from fints_session import create_client  # gemeinsamer Verbindungsaufbau (wie fi
 
 # Automatische Kategorisierung + Vorschlagskategorien (web/kategorien.py).
 from web.kategorien import apply_categorization_to_db, ensure_default_categories
+from web.kategorien import migrate_learned_rule_keys
 
 SCHEMA_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "schema.sql")
 
@@ -73,6 +74,8 @@ def apply_schema(connection: sqlite3.Connection) -> None:
     _migrate(connection)
     # Vorschlagskategorien (idempotent) – nur anlegen, nichts überschreiben.
     ensure_default_categories(connection)
+    # Gelernte Regeln auf die aktuelle Schlüssel-Normalisierung heben.
+    migrate_learned_rule_keys(connection)
     # Einmalige Bereinigung alter Duplikate: Der frühere Hash enthielt Status
     # und Referenzen, die sich zwischen Abrufen ändern können. Existiert der
     # neue Unique-Index noch nicht, werden die Hashes neu berechnet und
